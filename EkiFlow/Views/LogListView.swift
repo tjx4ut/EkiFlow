@@ -19,13 +19,18 @@ struct LogListView: View {
     @EnvironmentObject var tabResetManager: TabResetManager
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \StationLog.timestamp, order: .reverse) private var logs: [StationLog]
-    
+
     @State private var searchText = ""
     @State private var selectedFilter: LogStatus? = nil
     @State private var sortOption: LogSortOption = .visitedDateDesc
     @State private var viewMode: LogViewMode = .list
     @State private var selectedLogDate: Date? = nil
     @State private var scrollToTop: Bool = false
+
+    // キャッシュ用
+    @State private var cachedGroupedLogs: [LogGroup] = []
+    @State private var isProcessing: Bool = true
+    @State private var lastLogCount: Int = 0
     
     var filteredLogs: [StationLog] {
         var result = logs
@@ -74,52 +79,56 @@ struct LogListView: View {
         })
     }
     
-    // ログをグループ化（「すべて」タブのみ）- journeyId優先
+    // ログをグループ化（キャッシュを返す）
     var groupedLogs: [LogGroup] {
-        var groups: [LogGroup] = []
-        var processedIds = Set<UUID>()
-        
-        for log in sortedLogs {
-            if processedIds.contains(log.id) { continue }
-            
-            // journeyIdがある場合は旅全体でグループ化
-            if let journeyId = log.journeyId {
-                let journeyLogs = sortedLogs.filter { $0.journeyId == journeyId }
-                let ids = journeyLogs.map { $0.id }
-                processedIds.formUnion(ids)
-                
-                groups.append(LogGroup(
-                    id: journeyId,
-                    logs: journeyLogs.sorted { $0.createdAt < $1.createdAt },
-                    type: .journey
-                ))
+        cachedGroupedLogs
+    }
+
+    // グループ化を実行（バックグラウンド）
+    private func rebuildGroupedLogs() {
+        isProcessing = true
+
+        // バックグラウンドで計算
+        DispatchQueue.global(qos: .userInitiated).async {
+            let sorted = self.sortedLogs
+            var groups: [LogGroup] = []
+            var processedIds = Set<UUID>()
+
+            for log in sorted {
+                if processedIds.contains(log.id) { continue }
+
+                if let journeyId = log.journeyId {
+                    let journeyLogs = sorted.filter { $0.journeyId == journeyId }
+                    processedIds.formUnion(journeyLogs.map { $0.id })
+                    groups.append(LogGroup(
+                        id: journeyId,
+                        logs: journeyLogs.sorted { $0.createdAt < $1.createdAt },
+                        type: .journey
+                    ))
+                } else if let tripId = log.tripId {
+                    let tripLogs = sorted.filter { $0.tripId == tripId }
+                    processedIds.formUnion(tripLogs.map { $0.id })
+                    groups.append(LogGroup(
+                        id: tripId,
+                        logs: tripLogs.sorted {
+                            let v1 = $0.visitDate ?? $0.createdAt
+                            let v2 = $1.visitDate ?? $1.createdAt
+                            return v1 < v2
+                        },
+                        type: .trip
+                    ))
+                } else {
+                    processedIds.insert(log.id)
+                    groups.append(LogGroup(id: log.id, logs: [log], type: .single))
+                }
             }
-            // tripIdがある場合は経路でグループ化
-            else if let tripId = log.tripId {
-                let tripLogs = sortedLogs.filter { $0.tripId == tripId }
-                let ids = tripLogs.map { $0.id }
-                processedIds.formUnion(ids)
-                
-                groups.append(LogGroup(
-                    id: tripId,
-                    logs: tripLogs.sorted { 
-                        let v1 = $0.visitDate ?? $0.createdAt
-                        let v2 = $1.visitDate ?? $1.createdAt
-                        return v1 < v2
-                    },
-                    type: .trip
-                ))
-            } else {
-                processedIds.insert(log.id)
-                groups.append(LogGroup(
-                    id: log.id,
-                    logs: [log],
-                    type: .single
-                ))
+
+            DispatchQueue.main.async {
+                self.cachedGroupedLogs = groups
+                self.lastLogCount = self.logs.count
+                self.isProcessing = false
             }
         }
-        
-        return groups
     }
     
     var body: some View {
@@ -134,8 +143,18 @@ struct LogListView: View {
                 .pickerStyle(.segmented)
                 .padding(.horizontal)
                 .padding(.top, 8)
-                
-                if viewMode == .list {
+
+                if isProcessing && cachedGroupedLogs.isEmpty {
+                    // 初回ローディング
+                    VStack(spacing: 16) {
+                        ProgressView()
+                            .scaleEffect(1.5)
+                        Text("ログを読み込み中...")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if viewMode == .list {
                     listView
                 } else {
                     calendarView
@@ -150,6 +169,7 @@ struct LogListView: View {
                             ForEach(LogSortOption.allCases, id: \.self) { option in
                                 Button {
                                     sortOption = option
+                                    rebuildGroupedLogs()
                                 } label: {
                                     HStack {
                                         Text(option.rawValue)
@@ -167,6 +187,21 @@ struct LogListView: View {
             }
             .onChange(of: tabResetManager.logResetTrigger) { oldValue, newValue in
                 resetToTop()
+            }
+            .onAppear {
+                // 初回またはログ数が変わった場合に再計算
+                if cachedGroupedLogs.isEmpty || logs.count != lastLogCount {
+                    rebuildGroupedLogs()
+                }
+            }
+            .onChange(of: logs.count) { _, _ in
+                rebuildGroupedLogs()
+            }
+            .onChange(of: selectedFilter) { _, _ in
+                rebuildGroupedLogs()
+            }
+            .onChange(of: searchText) { _, _ in
+                rebuildGroupedLogs()
             }
         }
     }

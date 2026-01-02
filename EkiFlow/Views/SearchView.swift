@@ -17,30 +17,44 @@ struct SearchView: View {
     
     var body: some View {
         NavigationStack {
-            VStack(spacing: 0) {
-                // タブ切り替え
-                Picker("検索モード", selection: $searchMode) {
-                    ForEach(SearchMode.allCases, id: \.self) { mode in
-                        Text(mode.rawValue).tag(mode)
+            // データロード中はローディング表示
+            if viewModel.isLoading {
+                VStack(spacing: 16) {
+                    ProgressView()
+                        .scaleEffect(1.5)
+                    Text("駅データを読み込み中...")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .navigationTitle("検索")
+                .navigationBarTitleDisplayMode(.inline)
+            } else {
+                VStack(spacing: 0) {
+                    // タブ切り替え
+                    Picker("検索モード", selection: $searchMode) {
+                        ForEach(SearchMode.allCases, id: \.self) { mode in
+                            Text(mode.rawValue).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .padding()
+
+                    if searchMode == .station {
+                        stationSearchView
+                    } else {
+                        LineSearchView()
+                            .id(lineSearchResetId)
                     }
                 }
-                .pickerStyle(.segmented)
-                .padding()
-                
-                if searchMode == .station {
-                    stationSearchView
-                } else {
-                    LineSearchView()
-                        .id(lineSearchResetId)
+                .navigationTitle("検索")
+                .navigationBarTitleDisplayMode(.inline)
+                .sheet(item: $selectedStation) { station in
+                    StationDetailView(station: station, showCloseButton: true)
                 }
-            }
-            .navigationTitle("検索")
-            .navigationBarTitleDisplayMode(.inline)
-            .sheet(item: $selectedStation) { station in
-                StationDetailView(station: station, showCloseButton: true)
-            }
-            .onChange(of: tabResetManager.searchResetTrigger) { oldValue, newValue in
-                resetToTop()
+                .onChange(of: tabResetManager.searchResetTrigger) { oldValue, newValue in
+                    resetToTop()
+                }
             }
         }
     }
@@ -54,6 +68,20 @@ struct SearchView: View {
     
     private var stationSearchView: some View {
         List {
+            // 検索中のインジケーター
+            if viewModel.isSearching {
+                HStack {
+                    Spacer()
+                    ProgressView()
+                        .scaleEffect(0.8)
+                    Text("検索中...")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .listRowBackground(Color.clear)
+            }
+
             // エイリアスで検索された場合のヒント
             if !viewModel.searchText.isEmpty {
                 let matchedByAlias = viewModel.filteredStations.filter { station in
@@ -62,7 +90,7 @@ struct SearchView: View {
                         alias.localizedCaseInsensitiveContains(viewModel.searchText)
                     }
                 }
-                
+
                 if !matchedByAlias.isEmpty {
                     Section {
                         ForEach(matchedByAlias) { station in
@@ -80,12 +108,12 @@ struct SearchView: View {
                         Text("別名での検索結果")
                     }
                 }
-                
+
                 // 駅名で直接マッチした駅
                 let matchedByName = viewModel.filteredStations.filter { station in
                     station.name.localizedCaseInsensitiveContains(viewModel.searchText)
                 }
-                
+
                 if !matchedByName.isEmpty {
                     Section {
                         ForEach(matchedByName) { station in
@@ -283,21 +311,21 @@ struct LineSearchView: View {
                                 Image(systemName: selectedStationIds.contains(station.id) ? "checkmark.circle.fill" : "circle")
                                     .foregroundStyle(selectedStationIds.contains(station.id) ? .blue : .gray)
                             }
-                            
+
                             VStack(alignment: .leading) {
                                 Text(station.name)
                                 Text(station.prefecture)
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
-                            
+
                             Spacer()
-                            
+
                             // 現在のステータス
                             if let status = viewModel.getStrongestStatus(for: station.id) {
                                 Text(status.emoji)
                             }
-                            
+
                             // 通常モードのみ矢印表示
                             if !isSelectionMode {
                                 Image(systemName: "chevron.right")
@@ -328,36 +356,37 @@ struct LineSearchView: View {
                     }
                 }
             }
-            
-            // 一括変更ボタン（選択モードかつ選択がある場合）
-            if isSelectionMode && !selectedStationIds.isEmpty {
-                VStack(spacing: 12) {
-                    Text("\(selectedStationIds.count)駅を選択中")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    
-                    HStack(spacing: 12) {
-                        ForEach(LogStatus.allCases, id: \.self) { status in
-                            Button {
-                                applyStatusToSelected(status)
-                            } label: {
-                                VStack(spacing: 4) {
-                                    Text(status.emoji)
-                                        .font(.title2)
-                                    Text(status.displayName)
-                                        .font(.caption2)
+            .safeAreaInset(edge: .bottom) {
+                // 一括変更ボタン（選択モードかつ選択がある場合）
+                if isSelectionMode && !selectedStationIds.isEmpty {
+                    VStack(spacing: 12) {
+                        Text("\(selectedStationIds.count)駅を選択中")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+
+                        HStack(spacing: 12) {
+                            ForEach(LogStatus.allCases, id: \.self) { status in
+                                Button {
+                                    applyStatusToSelected(status)
+                                } label: {
+                                    VStack(spacing: 4) {
+                                        Text(status.emoji)
+                                            .font(.title2)
+                                        Text(status.displayName)
+                                            .font(.caption2)
+                                    }
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 8)
+                                    .background(status.color.opacity(0.2))
+                                    .clipShape(RoundedRectangle(cornerRadius: 8))
                                 }
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 8)
-                                .background(status.color.opacity(0.2))
-                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                                .foregroundStyle(status.color)
                             }
-                            .foregroundStyle(status.color)
                         }
                     }
+                    .padding()
+                    .background(Color(.systemGroupedBackground))
                 }
-                .padding()
-                .background(Color(.systemGroupedBackground))
             }
         }
     }
@@ -371,33 +400,54 @@ struct LineSearchView: View {
     
     private func applyStatusToSelected(_ status: LogStatus) {
         isProcessing = true
-        
-        // UIの更新を先に行うため、少し遅延させて処理
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            for stationId in selectedStationIds {
-                if let station = lineStations.first(where: { $0.id == stationId }) {
+
+        // 選択中の駅IDとデータをコピー
+        let stationIdsToProcess = selectedStationIds
+        let stationsData = lineStations.filter { stationIdsToProcess.contains($0.id) }
+        let lineName = selectedLine ?? ""
+
+        // UIを即座に更新（選択解除）
+        selectedStationIds.removeAll()
+        isSelectionMode = false
+
+        // バックグラウンドでログを準備
+        Task.detached(priority: .userInitiated) {
+            // ログデータを準備（バックグラウンド）
+            var logsToInsert: [(stationId: String, stationName: String, status: LogStatus, memo: String)] = []
+
+            for station in stationsData {
+                logsToInsert.append((
+                    stationId: station.id,
+                    stationName: station.name,
+                    status: status,
+                    memo: "路線一括登録: \(lineName)"
+                ))
+            }
+
+            // メインスレッドでDB操作
+            await MainActor.run {
+                for logData in logsToInsert {
                     let log = StationLog(
-                        stationId: stationId,
-                        stationName: station.name,
-                        status: status,
-                        memo: "路線一括登録: \(selectedLine ?? "")"
+                        stationId: logData.stationId,
+                        stationName: logData.stationName,
+                        status: logData.status,
+                        memo: logData.memo
                     )
                     modelContext.insert(log)
                 }
+
+                do {
+                    try modelContext.save()
+                } catch {
+                    print("Error saving: \(error)")
+                }
+
+                // キャッシュ無効化は少し遅延させる（UI応答性確保）
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    viewModel.invalidateCache()
+                    isProcessing = false
+                }
             }
-            
-            // 保存
-            do {
-                try modelContext.save()
-                viewModel.invalidateCache()
-            } catch {
-                print("Error saving: \(error)")
-            }
-            
-            // 選択解除して通常モードに戻る（路線詳細には留まる）
-            selectedStationIds.removeAll()
-            isSelectionMode = false
-            isProcessing = false
         }
     }
 }

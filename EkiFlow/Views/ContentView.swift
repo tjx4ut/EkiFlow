@@ -14,13 +14,26 @@ enum AppTab: Int, CaseIterable {
 class TabResetManager: ObservableObject {
     @Published var searchResetTrigger = UUID()
     @Published var logResetTrigger = UUID()
-    
+
     func resetSearch() {
         searchResetTrigger = UUID()
     }
-    
+
     func resetLog() {
         logResetTrigger = UUID()
+    }
+}
+
+// 遅延読み込み用ラッパー（タブが選択されるまでViewを初期化しない）
+struct LazyView<Content: View>: View {
+    let build: () -> Content
+
+    init(_ build: @autoclosure @escaping () -> Content) {
+        self.build = build
+    }
+
+    var body: Content {
+        build()
     }
 }
 
@@ -29,7 +42,10 @@ struct ContentView: View {
     @StateObject private var viewModel = StationViewModel()
     @StateObject private var tabResetManager = TabResetManager()
     @State private var selectedTab: AppTab = .home
-    
+
+    // 各タブの初期化済みフラグ
+    @State private var initializedTabs: Set<AppTab> = [.home]
+
     var body: some View {
         TabView(selection: tabSelection) {
             HomeView()
@@ -37,36 +53,68 @@ struct ContentView: View {
                     Label("ホーム", systemImage: "house.fill")
                 }
                 .tag(AppTab.home)
-            
-            SearchView()
-                .tabItem {
-                    Label("検索", systemImage: "magnifyingglass")
-                }
-                .tag(AppTab.search)
-            
-            LogListView()
-                .tabItem {
-                    Label("ログ", systemImage: "list.bullet")
-                }
-                .tag(AppTab.log)
-            
-            MapView()
-                .tabItem {
-                    Label("マップ", systemImage: "map.fill")
-                }
-                .tag(AppTab.map)
-            
-            StatsView()
-                .tabItem {
-                    Label("統計", systemImage: "chart.bar.fill")
-                }
-                .tag(AppTab.stats)
+
+            tabContent(for: .search) {
+                SearchView()
+            }
+            .tabItem {
+                Label("検索", systemImage: "magnifyingglass")
+            }
+            .tag(AppTab.search)
+
+            tabContent(for: .log) {
+                LogListView()
+            }
+            .tabItem {
+                Label("ログ", systemImage: "list.bullet")
+            }
+            .tag(AppTab.log)
+
+            tabContent(for: .map) {
+                MapView()
+            }
+            .tabItem {
+                Label("マップ", systemImage: "map.fill")
+            }
+            .tag(AppTab.map)
+
+            tabContent(for: .stats) {
+                StatsView()
+            }
+            .tabItem {
+                Label("統計", systemImage: "chart.bar.fill")
+            }
+            .tag(AppTab.stats)
         }
         .environmentObject(viewModel)
         .environmentObject(tabResetManager)
         .onAppear {
             viewModel.setModelContext(modelContext)
             setupTabBarAppearance()
+        }
+    }
+
+    // タブコンテンツ（未初期化ならローディング表示）
+    @ViewBuilder
+    private func tabContent<Content: View>(for tab: AppTab, @ViewBuilder content: @escaping () -> Content) -> some View {
+        if initializedTabs.contains(tab) {
+            content()
+        } else {
+            // ローディング表示
+            VStack(spacing: 16) {
+                ProgressView()
+                    .scaleEffect(1.5)
+                Text("読み込み中...")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onAppear {
+                // 少し遅延させてからViewを初期化（UIの応答性を保つ）
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    initializedTabs.insert(tab)
+                }
+            }
         }
     }
     
