@@ -302,61 +302,72 @@ struct LineSearchView: View {
             .background(Color(.systemGroupedBackground))
             
             // 駅一覧
-            List {
-                Section("\(lineStations.count)駅") {
-                    ForEach(lineStations) { station in
-                        HStack {
-                            // チェックボックス（選択モード時のみ）
-                            if isSelectionMode {
-                                Image(systemName: selectedStationIds.contains(station.id) ? "checkmark.circle.fill" : "circle")
-                                    .foregroundStyle(selectedStationIds.contains(station.id) ? .blue : .gray)
-                            }
-
-                            VStack(alignment: .leading) {
-                                Text(station.name)
-                                Text(station.prefecture)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-
-                            Spacer()
-
-                            // 現在のステータス
-                            if let status = viewModel.getStrongestStatus(for: station.id) {
-                                Text(status.emoji)
-                            }
-
-                            // 通常モードのみ矢印表示
-                            if !isSelectionMode {
-                                Image(systemName: "chevron.right")
-                                    .font(.caption)
-                                    .foregroundStyle(.tertiary)
-                            }
-                        }
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            if isSelectionMode {
-                                if selectedStationIds.contains(station.id) {
-                                    selectedStationIds.remove(station.id)
-                                } else {
-                                    selectedStationIds.insert(station.id)
+            ScrollViewReader { proxy in
+                List {
+                    Section("\(lineStations.count)駅") {
+                        ForEach(lineStations) { station in
+                            HStack {
+                                // チェックボックス（選択モード時のみ）
+                                if isSelectionMode {
+                                    Image(systemName: selectedStationIds.contains(station.id) ? "checkmark.circle.fill" : "circle")
+                                        .foregroundStyle(selectedStationIds.contains(station.id) ? .blue : .gray)
                                 }
-                            } else {
-                                // 通常モード：駅詳細に遷移
-                                let stationModel = Station(
-                                    id: station.id,
-                                    name: station.name,
-                                    prefecture: station.prefecture,
-                                    latitude: station.latitude,
-                                    longitude: station.longitude
-                                )
-                                selectedStationForDetail = stationModel
+
+                                VStack(alignment: .leading) {
+                                    Text(station.name)
+                                    Text(station.prefecture)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                Spacer()
+
+                                // 現在のステータス
+                                if let status = viewModel.getStrongestStatus(for: station.id) {
+                                    Text(status.emoji)
+                                }
+
+                                // 通常モードのみ矢印表示
+                                if !isSelectionMode {
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption)
+                                        .foregroundStyle(.tertiary)
+                                }
+                            }
+                            .contentShape(Rectangle())
+                            .id(station.id)
+                            .onTapGesture {
+                                if isSelectionMode {
+                                    let wasEmpty = selectedStationIds.isEmpty
+                                    if selectedStationIds.contains(station.id) {
+                                        selectedStationIds.remove(station.id)
+                                    } else {
+                                        selectedStationIds.insert(station.id)
+                                        // 最初の選択時、少し遅延させてスクロール（ボタン表示後に調整）
+                                        if wasEmpty {
+                                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                                withAnimation {
+                                                    proxy.scrollTo(station.id, anchor: .center)
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // 通常モード：駅詳細に遷移
+                                    let stationModel = Station(
+                                        id: station.id,
+                                        name: station.name,
+                                        prefecture: station.prefecture,
+                                        latitude: station.latitude,
+                                        longitude: station.longitude
+                                    )
+                                    selectedStationForDetail = stationModel
+                                }
                             }
                         }
                     }
                 }
-            }
-            .safeAreaInset(edge: .bottom) {
+                .safeAreaInset(edge: .bottom) {
                 // 一括変更ボタン（選択モードかつ選択がある場合）
                 if isSelectionMode && !selectedStationIds.isEmpty {
                     VStack(spacing: 12) {
@@ -388,9 +399,10 @@ struct LineSearchView: View {
                     .background(Color(.systemGroupedBackground))
                 }
             }
+            } // ScrollViewReader閉じ
         }
     }
-    
+
     private func selectLine(_ line: String) {
         selectedLine = line
         lineStations = RouteSearchService.shared.getStationsForLine(line)
@@ -442,9 +454,8 @@ struct LineSearchView: View {
                     print("Error saving: \(error)")
                 }
 
-                // キャッシュ無効化は少し遅延させる（UI応答性確保）
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    viewModel.invalidateCache()
+                // キャッシュを非同期で再構築してから完了
+                viewModel.invalidateCacheAndRebuildAsync {
                     isProcessing = false
                 }
             }

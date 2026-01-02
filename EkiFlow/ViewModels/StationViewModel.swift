@@ -292,6 +292,22 @@ class StationViewModel: ObservableObject {
         cacheInvalidated = true
         strongestStatusCacheValid = false
     }
+
+    /// キャッシュを無効化して非同期で再構築（完了後にコールバック）
+    func invalidateCacheAndRebuildAsync(completion: @escaping () -> Void) {
+        invalidateCache()
+
+        // バックグラウンドでキャッシュを再構築
+        Task.detached(priority: .userInitiated) {
+            await MainActor.run {
+                // キャッシュを再構築（getStrongestStatusを呼ぶと内部でbuildStrongestStatusCacheが実行される）
+                _ = self.getStrongestStatus(for: "")
+            }
+            await MainActor.run {
+                completion()
+            }
+        }
+    }
     
     /// 最寄り駅を解除（ログは削除せず、解除ログを追加）
     func removeHome(stationId: String) {

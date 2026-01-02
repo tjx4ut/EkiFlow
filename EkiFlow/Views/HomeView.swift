@@ -6,15 +6,15 @@ struct HomeView: View {
     @Environment(\.modelContext) private var modelContext
     @State private var showingTripInput = false
 
-    // 最寄り駅一覧
-    private var homeStations: [Station] {
-        viewModel.getHomeStations()
-    }
+    // キャッシュ用
+    @State private var cachedHomeStations: [Station] = []
+    @State private var cachedTotalCount: Int = 0
+    @State private var isDataLoaded: Bool = false
 
     private var isLoading: Bool {
-        viewModel.allStations.isEmpty
+        viewModel.allStations.isEmpty || !isDataLoaded
     }
-    
+
     var body: some View {
         NavigationStack {
             Group {
@@ -32,11 +32,11 @@ struct HomeView: View {
                         VStack(spacing: 20) {
                             // 統計カード
                             HStack(spacing: 16) {
-                                StatCard(title: "訪問駅数", value: "\(viewModel.getTotalStationCount())", icon: "mappin.circle.fill", color: .blue)
+                                StatCard(title: "訪問駅数", value: "\(cachedTotalCount)", icon: "mappin.circle.fill", color: .blue)
                                 StatCard(title: "全国駅数", value: "\(viewModel.allStations.count)", icon: "tram.fill", color: .green)
                             }
                             .padding(.horizontal)
-                            
+
                             // 旅程入力ボタン
                             Button {
                                 showingTripInput = true
@@ -53,20 +53,20 @@ struct HomeView: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 12))
                             }
                             .padding(.horizontal)
-                            
+
                             // 最寄り駅セクション
                             VStack(alignment: .leading, spacing: 12) {
                                 HStack {
                                     Text("最寄り駅")
                                         .font(.headline)
                                     Spacer()
-                                    Text("\(homeStations.count)駅登録中")
+                                    Text("\(cachedHomeStations.count)駅登録中")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
                                 .padding(.horizontal)
 
-                                if homeStations.isEmpty {
+                                if cachedHomeStations.isEmpty {
                                     Text("駅詳細画面から最寄りに追加できます")
                                         .foregroundStyle(.secondary)
                                         .font(.caption)
@@ -75,7 +75,7 @@ struct HomeView: View {
                                 } else {
                                     ScrollView(.horizontal, showsIndicators: false) {
                                         HStack(spacing: 12) {
-                                            ForEach(homeStations) { station in
+                                            ForEach(cachedHomeStations) { station in
                                                 HomeStationChip(station: station)
                                             }
                                         }
@@ -91,6 +91,28 @@ struct HomeView: View {
             .navigationTitle("EkiFlow")
             .sheet(isPresented: $showingTripInput) {
                 TripInputView()
+            }
+            .onAppear {
+                loadDataAsync()
+            }
+        }
+    }
+
+    private func loadDataAsync() {
+        guard !viewModel.allStations.isEmpty else { return }
+
+        // 既にロード済みなら即表示
+        if isDataLoaded { return }
+
+        // バックグラウンドでデータ取得
+        Task {
+            let homeStations = viewModel.getHomeStations()
+            let totalCount = viewModel.getTotalStationCount()
+
+            await MainActor.run {
+                cachedHomeStations = homeStations
+                cachedTotalCount = totalCount
+                isDataLoaded = true
             }
         }
     }
