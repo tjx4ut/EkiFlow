@@ -6,26 +6,133 @@ import CoreLocation
 @MainActor
 class StationViewModel: ObservableObject {
     @Published var allStations: [Station] = []
-    @Published var searchText: String = ""
-    
+    @Published var searchText: String = "" {
+        didSet {
+            // 検索テキストが変わったらデバウンス付きで検索実行
+            scheduleSearch()
+        }
+    }
+    @Published var isLoading: Bool = true  // ローディング状態
+    @Published var cachedFilteredStations: [Station] = []  // 検索結果キャッシュ
+    @Published var isSearching: Bool = false  // 検索中フラグ
+
     private var modelContext: ModelContext?
     private var stationDataCache: [RailwayStation] = []
     private var stationById: [String: RailwayStation] = [:]
     private var stationAliases: [String: [String]] = [:]  // id -> aliases
-    
+
     // 統計キャッシュ
     private var cachedTotalStationCount: Int?
     private var cachedHomeStations: [Station]?
     private var cachedStatusCounts: [LogStatus: Int]?
     private var cachedPrefectureCounts: [String: Int]?
     private var cacheInvalidated = true
-    
+
+    // 駅ごとの最強ステータスキャッシュ（タブ移動高速化用）
+    private var cachedStrongestStatus: [String: LogStatus] = [:]
+    private var strongestStatusCacheValid = false
+
+    // 検索デバウンス用
+    private var searchTask: Task<Void, Never>?
+
     // 位置情報
     private let locationManager = LocationManager.shared
-    
+
     init() {
-        loadStations()
         locationManager.requestPermission()
+        // 非同期でロード開始
+        Task {
+            await loadStationsAsync()
+        }
+    }
+
+    /// デバウンス付きで検索をスケジュール
+    private func scheduleSearch() {
+        searchTask?.cancel()
+        searchTask = Task {
+            // 0.15秒待つ（デバウンス）
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            guard !Task.isCancelled else { return }
+            await performSearch()
+        }
+    }
+
+    /// バックグラウンドで検索実行
+    private func performSearch() async {
+        isSearching = true
+        let query = searchText
+        let stations = allStations
+        let aliases = stationAliases
+        let location = locationManager.currentLocation
+
+        // バックグラウンドスレッドで検索
+        let result = await Task.detached(priority: .userInitiated) { () -> [Station] in
+            // 検索バーが空の場合 → 現在地から近い順
+            if query.isEmpty {
+                if let loc = location {
+                    let userLat = loc.coordinate.latitude
+                    let userLon = loc.coordinate.longitude
+                    return stations.sorted {
+                        Self.distance(from: userLat, lon: userLon, to: $0) < Self.distance(from: userLat, lon: userLon, to: $1)
+                    }
+                } else {
+                    return stations
+                }
+            }
+
+            let queryLower = query.lowercased()
+            var exactMatch: [Station] = []
+            var aliasExactMatch: [Station] = []
+            var partialMatch: [Station] = []
+            var aliasPartialMatch: [Station] = []
+
+            for station in stations {
+                let nameLower = station.name.lowercased()
+                let stationAliases = aliases[station.id] ?? []
+
+                if nameLower == queryLower {
+                    exactMatch.append(station)
+                } else if stationAliases.contains(where: { $0.lowercased() == queryLower }) {
+                    aliasExactMatch.append(station)
+                } else if nameLower.contains(queryLower) {
+                    partialMatch.append(station)
+                } else if stationAliases.contains(where: { $0.lowercased().contains(queryLower) }) {
+                    aliasPartialMatch.append(station)
+                }
+            }
+
+            // 部分一致は距離順（現在地がある場合）
+            if let loc = location {
+                let userLat = loc.coordinate.latitude
+                let userLon = loc.coordinate.longitude
+                partialMatch.sort { Self.distance(from: userLat, lon: userLon, to: $0) < Self.distance(from: userLat, lon: userLon, to: $1) }
+                aliasPartialMatch.sort { Self.distance(from: userLat, lon: userLon, to: $0) < Self.distance(from: userLat, lon: userLon, to: $1) }
+            } else {
+                partialMatch.sort { $0.name.count < $1.name.count }
+                aliasPartialMatch.sort { $0.name.count < $1.name.count }
+            }
+
+            return exactMatch + aliasExactMatch + partialMatch + aliasPartialMatch
+        }.value
+
+        // 最新の検索クエリと一致する場合のみ更新
+        if searchText == query {
+            cachedFilteredStations = result
+        }
+        isSearching = false
+    }
+
+    /// 距離計算（static版、バックグラウンドスレッドから呼ぶ用）
+    nonisolated private static func distance(from lat1: Double, lon lon1: Double, to station: Station) -> Double {
+        let lat2 = station.latitude
+        let lon2 = station.longitude
+        let dLat = (lat2 - lat1) * .pi / 180
+        let dLon = (lon2 - lon1) * .pi / 180
+        let a = sin(dLat/2) * sin(dLat/2) +
+                cos(lat1 * .pi / 180) * cos(lat2 * .pi / 180) *
+                sin(dLon/2) * sin(dLon/2)
+        let c = 2 * atan2(sqrt(a), sqrt(1-a))
+        return 6371 * c
     }
     
     convenience init(modelContext: ModelContext) {
@@ -37,100 +144,67 @@ class StationViewModel: ObservableObject {
         self.modelContext = context
     }
     
-    func loadStations() {
-        // 新しいファイル名: japan_stations.json
-        guard let url = Bundle.main.url(forResource: "japan_stations", withExtension: "json") else {
-            print("❌ japan_stations.json not found")
-            return
-        }
-        
-        do {
-            let data = try Data(contentsOf: url)
-            let railwayData = try JSONDecoder().decode(RailwayData.self, from: data)
-            stationDataCache = railwayData.stations
-            
-            // ID→駅のマッピングとエイリアスを保存
-            for station in railwayData.stations {
-                stationById[station.id] = station
-                if let aliases = station.aliases, !aliases.isEmpty {
-                    stationAliases[station.id] = aliases
+    /// 非同期で駅データをロード（UIをブロックしない）
+    private func loadStationsAsync() async {
+        isLoading = true
+
+        // バックグラウンドスレッドでJSONを読み込み・パース
+        let result = await Task.detached(priority: .userInitiated) { () -> (stations: [Station], cache: [RailwayStation], byId: [String: RailwayStation], aliases: [String: [String]])? in
+            guard let url = Bundle.main.url(forResource: "japan_stations", withExtension: "json") else {
+                print("❌ japan_stations.json not found")
+                return nil
+            }
+
+            do {
+                let data = try Data(contentsOf: url)
+                let railwayData = try JSONDecoder().decode(RailwayData.self, from: data)
+
+                var byId: [String: RailwayStation] = [:]
+                var aliases: [String: [String]] = [:]
+
+                for station in railwayData.stations {
+                    byId[station.id] = station
+                    if let stationAliases = station.aliases, !stationAliases.isEmpty {
+                        aliases[station.id] = stationAliases
+                    }
                 }
+
+                let stations = railwayData.stations.map { s in
+                    Station(id: s.id, name: s.name, prefecture: s.prefecture, latitude: s.latitude, longitude: s.longitude)
+                }
+
+                return (stations, railwayData.stations, byId, aliases)
+            } catch {
+                print("❌ Error loading stations: \(error)")
+                return nil
             }
-            
-            allStations = railwayData.stations.map { s in
-                Station(id: s.id, name: s.name, prefecture: s.prefecture, latitude: s.latitude, longitude: s.longitude)
-            }
+        }.value
+
+        // メインスレッドでUI更新
+        if let result = result {
+            self.stationDataCache = result.cache
+            self.stationById = result.byId
+            self.stationAliases = result.aliases
+            self.allStations = result.stations
             print("✅ Loaded \(allStations.count) stations")
-        } catch {
-            print("❌ Error loading stations: \(error)")
+
+            // 初回検索を実行
+            await performSearch()
+        }
+
+        isLoading = false
+    }
+
+    func loadStations() {
+        // 互換性のために残す（同期版）
+        Task {
+            await loadStationsAsync()
         }
     }
     
-    /// 検索結果（完全一致 → 別名完全一致 → 部分一致(距離順) → 別名部分一致(距離順)）
-    /// 検索バーが空の時は現在地から近い順
+    /// 検索結果（キャッシュを返す）
     var filteredStations: [Station] {
-        // 検索バーが空の場合 → 現在地から近い順
-        if searchText.isEmpty {
-            if let location = locationManager.currentLocation {
-                let userLat = location.coordinate.latitude
-                let userLon = location.coordinate.longitude
-                return allStations.sorted {
-                    distance(from: userLat, lon: userLon, to: $0) < distance(from: userLat, lon: userLon, to: $1)
-                }
-            } else {
-                return allStations
-            }
-        }
-        
-        let query = searchText.lowercased()
-        
-        var exactMatch: [Station] = []
-        var aliasExactMatch: [Station] = []
-        var partialMatch: [Station] = []
-        var aliasPartialMatch: [Station] = []
-        
-        for station in allStations {
-            let nameLower = station.name.lowercased()
-            let aliases = stationAliases[station.id] ?? []
-            
-            // 駅名完全一致
-            if nameLower == query {
-                exactMatch.append(station)
-                continue
-            }
-            
-            // 別名完全一致
-            if aliases.contains(where: { $0.lowercased() == query }) {
-                aliasExactMatch.append(station)
-                continue
-            }
-            
-            // 駅名部分一致
-            if nameLower.contains(query) {
-                partialMatch.append(station)
-                continue
-            }
-            
-            // 別名部分一致
-            if aliases.contains(where: { $0.lowercased().contains(query) }) {
-                aliasPartialMatch.append(station)
-            }
-        }
-        
-        // 部分一致は距離順（現在地がある場合）
-        if let location = locationManager.currentLocation {
-            let userLat = location.coordinate.latitude
-            let userLon = location.coordinate.longitude
-            
-            partialMatch.sort { distance(from: userLat, lon: userLon, to: $0) < distance(from: userLat, lon: userLon, to: $1) }
-            aliasPartialMatch.sort { distance(from: userLat, lon: userLon, to: $0) < distance(from: userLat, lon: userLon, to: $1) }
-        } else {
-            // 現在地がない場合は名前の短い順
-            partialMatch.sort { $0.name.count < $1.name.count }
-            aliasPartialMatch.sort { $0.name.count < $1.name.count }
-        }
-        
-        return exactMatch + aliasExactMatch + partialMatch + aliasPartialMatch
+        cachedFilteredStations
     }
     
     /// 2点間の距離を計算（簡易版、km）
@@ -152,25 +226,61 @@ class StationViewModel: ObservableObject {
     
     func saveLog(station: Station, status: LogStatus, memo: String, tripId: UUID? = nil) {
         guard let context = modelContext else { return }
-        
+
         // 最寄り駅（home）は複数設定可能
         // 同じ駅に同じステータスが既にある場合は追加しない
         if status == .home {
             let descriptor = FetchDescriptor<StationLog>()
             if let existingLogs = try? context.fetch(descriptor) {
-                let alreadyHome = existingLogs.contains { 
-                    $0.stationId == station.id && $0.status == .home 
+                let alreadyHome = existingLogs.contains {
+                    $0.stationId == station.id && $0.status == .home
                 }
                 if alreadyHome {
                     return  // 既に最寄り登録済み
                 }
             }
         }
-        
+
         let log = StationLog(stationId: station.id, stationName: station.name, status: status, memo: memo, tripId: tripId)
         context.insert(log)
         try? context.save()
-        invalidateCache()
+
+        // 部分的キャッシュ更新（全体を無効化せず、該当駅だけ更新）
+        updateStrongestStatusCache(for: station.id, newStatus: status)
+        invalidateCacheExceptStrongestStatus()
+    }
+
+    /// ステータスキャッシュを部分更新（1駅だけ）
+    private func updateStrongestStatusCache(for stationId: String, newStatus: LogStatus) {
+        guard strongestStatusCacheValid else { return }
+
+        let currentStatus = cachedStrongestStatus[stationId]
+
+        // home/homeRemovedの場合は再計算が必要
+        if newStatus == .home {
+            cachedStrongestStatus[stationId] = .home
+        } else if newStatus == .homeRemoved {
+            // homeRemovedの場合、訪問系の最強を再計算する必要があるのでキャッシュ無効化
+            strongestStatusCacheValid = false
+        } else {
+            // 訪問系ステータスの場合、既存より強ければ更新
+            if let current = currentStatus {
+                if current != .home && newStatus.strength > current.strength {
+                    cachedStrongestStatus[stationId] = newStatus
+                }
+            } else {
+                cachedStrongestStatus[stationId] = newStatus
+            }
+        }
+    }
+
+    /// 最強ステータスキャッシュ以外を無効化
+    private func invalidateCacheExceptStrongestStatus() {
+        cachedTotalStationCount = nil
+        cachedHomeStations = nil
+        cachedStatusCounts = nil
+        cachedPrefectureCounts = nil
+        cacheInvalidated = true
     }
     
     /// キャッシュを無効化
@@ -180,6 +290,7 @@ class StationViewModel: ObservableObject {
         cachedStatusCounts = nil
         cachedPrefectureCounts = nil
         cacheInvalidated = true
+        strongestStatusCacheValid = false
     }
     
     /// 最寄り駅を解除（ログは削除せず、解除ログを追加）
@@ -230,24 +341,56 @@ class StationViewModel: ObservableObject {
     }
     
     func getStrongestStatus(for stationId: String) -> LogStatus? {
-        guard let context = modelContext else { return nil }
-        let descriptor = FetchDescriptor<StationLog>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
-        guard let logs = try? context.fetch(descriptor) else { return nil }
-        
-        let stationLogs = logs.filter { $0.stationId == stationId }
-        
-        // 現在最寄りかどうかを判定（最新の最寄り関連ログが.homeかどうか）
-        let latestHomeLog = stationLogs.first { $0.status == .home || $0.status == .homeRemoved }
-        let isCurrentlyHome = latestHomeLog?.status == .home
-        
-        if isCurrentlyHome {
-            return .home
+        // キャッシュが有効ならそれを返す
+        if strongestStatusCacheValid {
+            return cachedStrongestStatus[stationId]
         }
-        
-        // 訪問系ステータス（visited, transferred, passed）の最強を返す
-        let visitStatuses: [LogStatus] = [.visited, .transferred, .passed]
-        let visitLogs = stationLogs.filter { visitStatuses.contains($0.status) }
-        return visitLogs.map { $0.status }.max(by: { $0.strength < $1.strength })
+
+        // キャッシュを一括構築
+        buildStrongestStatusCache()
+        return cachedStrongestStatus[stationId]
+    }
+
+    /// 全駅のステータスキャッシュを一括構築（1回のフェッチで全駅分を計算）
+    private func buildStrongestStatusCache() {
+        guard let context = modelContext else {
+            strongestStatusCacheValid = true
+            return
+        }
+
+        let descriptor = FetchDescriptor<StationLog>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
+        guard let logs = try? context.fetch(descriptor) else {
+            strongestStatusCacheValid = true
+            return
+        }
+
+        // 駅ごとにログをグループ化
+        var logsByStation: [String: [StationLog]] = [:]
+        for log in logs {
+            logsByStation[log.stationId, default: []].append(log)
+        }
+
+        // 各駅の最強ステータスを計算
+        var result: [String: LogStatus] = [:]
+        for (stationId, stationLogs) in logsByStation {
+            // 現在最寄りかどうかを判定
+            let latestHomeLog = stationLogs.first { $0.status == .home || $0.status == .homeRemoved }
+            let isCurrentlyHome = latestHomeLog?.status == .home
+
+            if isCurrentlyHome {
+                result[stationId] = .home
+            } else {
+                // 訪問系ステータスの最強を返す
+                let visitStatuses: [LogStatus] = [.visited, .transferred, .passed]
+                let visitLogs = stationLogs.filter { visitStatuses.contains($0.status) }
+                if let strongest = visitLogs.map({ $0.status }).max(by: { $0.strength < $1.strength }) {
+                    result[stationId] = strongest
+                }
+            }
+        }
+
+        cachedStrongestStatus = result
+        strongestStatusCacheValid = true
     }
     
     func getLogs(for stationId: String) -> [StationLog] {
