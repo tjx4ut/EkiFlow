@@ -418,6 +418,9 @@ struct LineSearchView: View {
         let stationsData = lineStations.filter { stationIdsToProcess.contains($0.id) }
         let lineName = selectedLine ?? ""
 
+        // グループ化用のtripIdを生成
+        let tripId = UUID()
+
         // UIを即座に更新（選択解除）
         selectedStationIds.removeAll()
         isSelectionMode = false
@@ -443,7 +446,8 @@ struct LineSearchView: View {
                         stationId: logData.stationId,
                         stationName: logData.stationName,
                         status: logData.status,
-                        memo: logData.memo
+                        memo: logData.memo,
+                        tripId: tripId  // グループ化用
                     )
                     modelContext.insert(log)
                 }

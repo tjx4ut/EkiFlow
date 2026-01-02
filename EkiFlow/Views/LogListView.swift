@@ -84,51 +84,49 @@ struct LogListView: View {
         cachedGroupedLogs
     }
 
-    // グループ化を実行（バックグラウンド）
+    // グループ化を実行
     private func rebuildGroupedLogs() {
         isProcessing = true
 
-        // バックグラウンドで計算
-        DispatchQueue.global(qos: .userInitiated).async {
-            let sorted = self.sortedLogs
-            var groups: [LogGroup] = []
-            var processedIds = Set<UUID>()
+        // メインスレッドでデータをコピーしてからグループ化
+        let sorted = sortedLogs
+        let currentLogCount = logs.count
 
-            for log in sorted {
-                if processedIds.contains(log.id) { continue }
+        var groups: [LogGroup] = []
+        var processedIds = Set<UUID>()
 
-                if let journeyId = log.journeyId {
-                    let journeyLogs = sorted.filter { $0.journeyId == journeyId }
-                    processedIds.formUnion(journeyLogs.map { $0.id })
-                    groups.append(LogGroup(
-                        id: journeyId,
-                        logs: journeyLogs.sorted { $0.createdAt < $1.createdAt },
-                        type: .journey
-                    ))
-                } else if let tripId = log.tripId {
-                    let tripLogs = sorted.filter { $0.tripId == tripId }
-                    processedIds.formUnion(tripLogs.map { $0.id })
-                    groups.append(LogGroup(
-                        id: tripId,
-                        logs: tripLogs.sorted {
-                            let v1 = $0.visitDate ?? $0.createdAt
-                            let v2 = $1.visitDate ?? $1.createdAt
-                            return v1 < v2
-                        },
-                        type: .trip
-                    ))
-                } else {
-                    processedIds.insert(log.id)
-                    groups.append(LogGroup(id: log.id, logs: [log], type: .single))
-                }
-            }
+        for log in sorted {
+            if processedIds.contains(log.id) { continue }
 
-            DispatchQueue.main.async {
-                self.cachedGroupedLogs = groups
-                self.lastLogCount = self.logs.count
-                self.isProcessing = false
+            if let journeyId = log.journeyId {
+                let journeyLogs = sorted.filter { $0.journeyId == journeyId }
+                processedIds.formUnion(journeyLogs.map { $0.id })
+                groups.append(LogGroup(
+                    id: journeyId,
+                    logs: journeyLogs.sorted { $0.createdAt < $1.createdAt },
+                    type: .journey
+                ))
+            } else if let tripId = log.tripId {
+                let tripLogs = sorted.filter { $0.tripId == tripId }
+                processedIds.formUnion(tripLogs.map { $0.id })
+                groups.append(LogGroup(
+                    id: tripId,
+                    logs: tripLogs.sorted {
+                        let v1 = $0.visitDate ?? $0.createdAt
+                        let v2 = $1.visitDate ?? $1.createdAt
+                        return v1 < v2
+                    },
+                    type: .trip
+                ))
+            } else {
+                processedIds.insert(log.id)
+                groups.append(LogGroup(id: log.id, logs: [log], type: .single))
             }
         }
+
+        cachedGroupedLogs = groups
+        lastLogCount = currentLogCount
+        isProcessing = false
     }
     
     var body: some View {
