@@ -31,6 +31,11 @@ struct LogListView: View {
     @State private var cachedGroupedLogs: [LogGroup] = []
     @State private var isProcessing: Bool = true
     @State private var lastLogCount: Int = 0
+
+    // 無限スクロール用
+    private let pageSize = 20
+    @State private var displayedGroupCount: Int = 20
+    @State private var displayedFilteredCount: Int = 20
     
     var filteredLogs: [StationLog] {
         var result = logs
@@ -194,12 +199,17 @@ struct LogListView: View {
             }
             .onChange(of: logs.count) { _, _ in
                 rebuildGroupedLogs()
+                displayedGroupCount = pageSize
+                displayedFilteredCount = pageSize
             }
             .onChange(of: selectedFilter) { _, _ in
                 rebuildGroupedLogs()
+                displayedFilteredCount = pageSize
             }
             .onChange(of: searchText) { _, _ in
                 rebuildGroupedLogs()
+                displayedGroupCount = pageSize
+                displayedFilteredCount = pageSize
             }
         }
     }
@@ -210,10 +220,43 @@ struct LogListView: View {
         viewMode = .list
         selectedLogDate = nil
         scrollToTop = true
+        // ページングをリセット
+        displayedGroupCount = pageSize
+        displayedFilteredCount = pageSize
     }
     
     // MARK: - List View
-    
+
+    // 表示用のグループ（ページング適用）
+    private var displayedGroups: [LogGroup] {
+        Array(groupedLogs.prefix(displayedGroupCount))
+    }
+
+    // 表示用のフィルタ済みログ（ページング適用）
+    private var displayedFilteredLogs: [StationLog] {
+        Array(sortedLogs.prefix(displayedFilteredCount))
+    }
+
+    private var hasMoreGroups: Bool {
+        displayedGroupCount < groupedLogs.count
+    }
+
+    private var hasMoreFilteredLogs: Bool {
+        displayedFilteredCount < sortedLogs.count
+    }
+
+    private func loadMoreGroups() {
+        if hasMoreGroups {
+            displayedGroupCount += pageSize
+        }
+    }
+
+    private func loadMoreFilteredLogs() {
+        if hasMoreFilteredLogs {
+            displayedFilteredCount += pageSize
+        }
+    }
+
     private var listView: some View {
         VStack(spacing: 0) {
             // フィルター
@@ -221,33 +264,75 @@ struct LogListView: View {
                 HStack(spacing: 8) {
                     FilterChip(title: "すべて", isSelected: selectedFilter == nil) {
                         selectedFilter = nil
+                        displayedFilteredCount = pageSize
                     }
                     ForEach(LogStatus.filterableCases, id: \.self) { status in
                         FilterChip(title: "\(status.emoji) \(status.displayName)", isSelected: selectedFilter == status) {
                             selectedFilter = status
+                            displayedFilteredCount = pageSize
                         }
                     }
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 8)
             }
-            
+
             // ログ一覧
             List {
                 if selectedFilter == nil {
-                    ForEach(groupedLogs) { group in
+                    ForEach(displayedGroups) { group in
                         LogGroupRow(group: group, viewModel: viewModel)
+                            .onAppear {
+                                // 最後の3件に到達したら追加読み込み
+                                if let index = displayedGroups.firstIndex(where: { $0.id == group.id }),
+                                   index >= displayedGroups.count - 3 {
+                                    loadMoreGroups()
+                                }
+                            }
                     }
                     .onDelete(perform: deleteGroups)
+
+                    // さらに読み込み中のインジケータ
+                    if hasMoreGroups {
+                        HStack {
+                            Spacer()
+                            ProgressView()
+                                .padding(.vertical, 8)
+                            Spacer()
+                        }
+                        .onAppear {
+                            loadMoreGroups()
+                        }
+                    }
                 } else {
-                    ForEach(sortedLogs) { log in
+                    ForEach(displayedFilteredLogs) { log in
                         if let station = viewModel.getStation(byId: log.stationId) {
                             NavigationLink(destination: StationDetailView(station: station, showCloseButton: false)) {
                                 SingleLogRow(log: log, stationName: station.name)
                             }
+                            .onAppear {
+                                // 最後の3件に到達したら追加読み込み
+                                if let index = displayedFilteredLogs.firstIndex(where: { $0.id == log.id }),
+                                   index >= displayedFilteredLogs.count - 3 {
+                                    loadMoreFilteredLogs()
+                                }
+                            }
                         }
                     }
                     .onDelete(perform: deleteSingleLogs)
+
+                    // さらに読み込み中のインジケータ
+                    if hasMoreFilteredLogs {
+                        HStack {
+                            Spacer()
+                            ProgressView()
+                                .padding(.vertical, 8)
+                            Spacer()
+                        }
+                        .onAppear {
+                            loadMoreFilteredLogs()
+                        }
+                    }
                 }
             }
         }
