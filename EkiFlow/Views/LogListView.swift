@@ -496,9 +496,19 @@ struct LogGroup: Identifiable {
     var memo: String {
         logs.first?.memo ?? ""
     }
-    
+
     var imageData: Data? {
         logs.first?.imageData
+    }
+
+    // 全ての画像を取得（グループ内の全ログから）
+    var allImages: [Data] {
+        logs.first?.allImages ?? []
+    }
+
+    // 写真があるかどうか
+    var hasImages: Bool {
+        !allImages.isEmpty
     }
 }
 
@@ -597,13 +607,18 @@ struct TripLogRow: View {
                     }
                     
                     // 写真アイコン
-                    if group.imageData != nil {
-                        Image(systemName: "photo")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                    if group.hasImages {
+                        HStack(spacing: 2) {
+                            Image(systemName: "photo")
+                            if group.allImages.count > 1 {
+                                Text("\(group.allImages.count)")
+                            }
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     }
                 }
-                
+
                 if !group.memo.isEmpty {
                     Text(group.memo)
                         .font(.caption)
@@ -615,7 +630,7 @@ struct TripLogRow: View {
         }
         .padding(.vertical, 4)
     }
-    
+
     private var stationNamesText: String {
         let names = group.logs.compactMap { log -> String? in
             viewModel.getStation(byId: log.stationId)?.name ?? log.stationName
@@ -638,37 +653,44 @@ struct TripLogDetailView: View {
     @Environment(\.dismiss) private var dismiss
     let group: LogGroup
     let viewModel: StationViewModel
-    
+
     @State private var showingEditSheet = false
     @State private var showDeleteConfirmation = false
     @State private var editDate: Date
     @State private var editMemo: String
-    @State private var editImageData: Data?
-    @State private var selectedPhotoItem: PhotosPickerItem? = nil
-    
+    @State private var editImagesData: [Data]
+    @State private var selectedPhotoItems: [PhotosPickerItem] = []
+
+    private let maxPhotos = 10
+
     init(group: LogGroup, viewModel: StationViewModel) {
         self.group = group
         self.viewModel = viewModel
         _editDate = State(initialValue: group.displayDate ?? Date())
         _editMemo = State(initialValue: group.memo)
-        _editImageData = State(initialValue: group.imageData)
+        _editImagesData = State(initialValue: group.allImages)
     }
-    
+
     var body: some View {
         List {
-            // 写真セクション
-            if let imageData = group.imageData,
-               let uiImage = UIImage(data: imageData) {
+            // 写真セクション（複数枚対応）
+            if !group.allImages.isEmpty {
                 Section {
-                    HStack {
-                        Spacer()
-                        Image(uiImage: uiImage)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(maxHeight: 250)
-                            .clipShape(RoundedRectangle(cornerRadius: 12))
-                        Spacer()
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 12) {
+                            ForEach(Array(group.allImages.enumerated()), id: \.offset) { index, imageData in
+                                if let uiImage = UIImage(data: imageData) {
+                                    Image(uiImage: uiImage)
+                                        .resizable()
+                                        .scaledToFill()
+                                        .frame(width: 200, height: 200)
+                                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                                }
+                            }
+                        }
+                        .padding(.vertical, 8)
                     }
+                    .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
                     .listRowBackground(Color.clear)
                 }
             }
@@ -732,7 +754,8 @@ struct TripLogDetailView: View {
                 Button("編集") {
                     editDate = group.displayDate ?? Date()
                     editMemo = group.memo
-                    editImageData = group.imageData
+                    editImagesData = group.allImages
+                    selectedPhotoItems = []
                     showingEditSheet = true
                 }
             }
@@ -741,7 +764,7 @@ struct TripLogDetailView: View {
             editSheet
         }
     }
-    
+
     private var editSheet: some View {
         NavigationStack {
             Form {
@@ -753,56 +776,74 @@ struct TripLogDetailView: View {
                     )
                     .datePickerStyle(.compact)
                 }
-                
+
                 Section("メモ") {
                     TextField("メモを入力", text: $editMemo, axis: .vertical)
                         .lineLimit(3...6)
                 }
-                
-                Section("写真") {
-                    if let imageData = editImageData,
-                       let uiImage = UIImage(data: imageData) {
-                        HStack {
-                            Spacer()
-                            Image(uiImage: uiImage)
-                                .resizable()
-                                .scaledToFit()
-                                .frame(maxHeight: 200)
-                                .clipShape(RoundedRectangle(cornerRadius: 8))
-                            Spacer()
+
+                Section("写真（\(editImagesData.count)/\(maxPhotos)枚）") {
+                    // 既存の写真を表示
+                    if !editImagesData.isEmpty {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 12) {
+                                ForEach(Array(editImagesData.enumerated()), id: \.offset) { index, imageData in
+                                    if let uiImage = UIImage(data: imageData) {
+                                        ZStack(alignment: .topTrailing) {
+                                            Image(uiImage: uiImage)
+                                                .resizable()
+                                                .scaledToFill()
+                                                .frame(width: 100, height: 100)
+                                                .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                                            Button {
+                                                editImagesData.remove(at: index)
+                                            } label: {
+                                                Image(systemName: "xmark.circle.fill")
+                                                    .foregroundStyle(.white, .red)
+                                                    .font(.title3)
+                                            }
+                                            .offset(x: 6, y: -6)
+                                        }
+                                    }
+                                }
+                            }
+                            .padding(.vertical, 8)
                         }
-                        
-                        Button(role: .destructive) {
-                            editImageData = nil
-                            selectedPhotoItem = nil
-                        } label: {
+                    }
+
+                    // 写真追加ボタン
+                    if editImagesData.count < maxPhotos {
+                        PhotosPicker(
+                            selection: $selectedPhotoItems,
+                            maxSelectionCount: maxPhotos - editImagesData.count,
+                            matching: .images
+                        ) {
                             HStack {
                                 Spacer()
-                                Label("写真を削除", systemImage: "trash")
+                                Label("写真を追加", systemImage: "photo.badge.plus")
                                 Spacer()
                             }
                         }
-                    }
-                    
-                    PhotosPicker(
-                        selection: $selectedPhotoItem,
-                        matching: .images
-                    ) {
-                        HStack {
-                            Spacer()
-                            Label(editImageData == nil ? "写真を追加" : "写真を変更", systemImage: "photo")
-                            Spacer()
-                        }
-                    }
-                    .onChange(of: selectedPhotoItem) { oldValue, newValue in
-                        Task {
-                            if let data = try? await newValue?.loadTransferable(type: Data.self) {
-                                editImageData = data
+                        .onChange(of: selectedPhotoItems) { oldValue, newValue in
+                            Task {
+                                for item in newValue {
+                                    if let data = try? await item.loadTransferable(type: Data.self) {
+                                        if editImagesData.count < maxPhotos {
+                                            editImagesData.append(data)
+                                        }
+                                    }
+                                }
+                                selectedPhotoItems = []
                             }
                         }
+                    } else {
+                        Text("写真は最大\(maxPhotos)枚までです")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
-                
+
                 // 削除セクション
                 Section {
                     Button(role: .destructive) {
@@ -858,7 +899,8 @@ struct TripLogDetailView: View {
             log.visitDate = editDate
             if index == 0 {
                 log.memo = editMemo
-                log.imageData = editImageData
+                log.imagesData = editImagesData
+                log.imageData = nil  // 新形式に移行
             }
         }
         try? modelContext.save()
@@ -898,13 +940,18 @@ struct JourneyLogRow: View {
                             .foregroundStyle(.secondary)
                     }
                     
-                    if group.imageData != nil {
-                        Image(systemName: "photo")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                    if group.hasImages {
+                        HStack(spacing: 2) {
+                            Image(systemName: "photo")
+                            if group.allImages.count > 1 {
+                                Text("\(group.allImages.count)")
+                            }
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     }
                 }
-                
+
                 if !group.memo.isEmpty {
                     Text(group.memo)
                         .font(.caption)
@@ -916,7 +963,7 @@ struct JourneyLogRow: View {
         }
         .padding(.vertical, 4)
     }
-    
+
     private var journeyTitle: String {
         // 各経路の出発・到着駅を取得
         let tripIds = Array(Set(group.logs.compactMap { $0.tripId }))
@@ -952,22 +999,24 @@ struct JourneyLogDetailView: View {
     @Environment(\.dismiss) private var dismiss
     let group: LogGroup
     let viewModel: StationViewModel
-    
+
     @State private var showingEditSheet = false
     @State private var showDeleteConfirmation = false
     @State private var editDate: Date
     @State private var editMemo: String
-    @State private var editImageData: Data?
-    @State private var selectedPhotoItem: PhotosPickerItem? = nil
-    
+    @State private var editImagesData: [Data]
+    @State private var selectedPhotoItems: [PhotosPickerItem] = []
+
+    private let maxPhotos = 10
+
     init(group: LogGroup, viewModel: StationViewModel) {
         self.group = group
         self.viewModel = viewModel
         _editDate = State(initialValue: group.displayDate ?? Date())
         _editMemo = State(initialValue: group.memo)
-        _editImageData = State(initialValue: group.imageData)
+        _editImagesData = State(initialValue: group.allImages)
     }
-    
+
     // 経路ごとにグループ化
     var routeGroups: [[StationLog]] {
         let tripIds = Array(Set(group.logs.compactMap { $0.tripId }))
@@ -975,22 +1024,27 @@ struct JourneyLogDetailView: View {
             group.logs.filter { $0.tripId == tripId }.sorted { $0.createdAt < $1.createdAt }
         }
     }
-    
+
     var body: some View {
         List {
-            // 写真セクション
-            if let imageData = group.imageData,
-               let uiImage = UIImage(data: imageData) {
+            // 写真セクション（複数枚対応）
+            if !group.allImages.isEmpty {
                 Section {
-                    HStack {
-                        Spacer()
-                        Image(uiImage: uiImage)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(maxHeight: 250)
-                            .clipShape(RoundedRectangle(cornerRadius: 12))
-                        Spacer()
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 12) {
+                            ForEach(Array(group.allImages.enumerated()), id: \.offset) { index, imageData in
+                                if let uiImage = UIImage(data: imageData) {
+                                    Image(uiImage: uiImage)
+                                        .resizable()
+                                        .scaledToFill()
+                                        .frame(width: 200, height: 200)
+                                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                                }
+                            }
+                        }
+                        .padding(.vertical, 8)
                     }
+                    .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
                     .listRowBackground(Color.clear)
                 }
             }
@@ -1058,7 +1112,8 @@ struct JourneyLogDetailView: View {
                 Button("編集") {
                     editDate = group.displayDate ?? Date()
                     editMemo = group.memo
-                    editImageData = group.imageData
+                    editImagesData = group.allImages
+                    selectedPhotoItems = []
                     showingEditSheet = true
                 }
             }
@@ -1067,7 +1122,7 @@ struct JourneyLogDetailView: View {
             editSheet
         }
     }
-    
+
     private var editSheet: some View {
         NavigationStack {
             Form {
@@ -1079,56 +1134,74 @@ struct JourneyLogDetailView: View {
                     )
                     .datePickerStyle(.compact)
                 }
-                
+
                 Section("メモ") {
                     TextField("メモを入力", text: $editMemo, axis: .vertical)
                         .lineLimit(3...6)
                 }
-                
-                Section("写真") {
-                    if let imageData = editImageData,
-                       let uiImage = UIImage(data: imageData) {
-                        HStack {
-                            Spacer()
-                            Image(uiImage: uiImage)
-                                .resizable()
-                                .scaledToFit()
-                                .frame(maxHeight: 200)
-                                .clipShape(RoundedRectangle(cornerRadius: 8))
-                            Spacer()
+
+                Section("写真（\(editImagesData.count)/\(maxPhotos)枚）") {
+                    // 既存の写真を表示
+                    if !editImagesData.isEmpty {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 12) {
+                                ForEach(Array(editImagesData.enumerated()), id: \.offset) { index, imageData in
+                                    if let uiImage = UIImage(data: imageData) {
+                                        ZStack(alignment: .topTrailing) {
+                                            Image(uiImage: uiImage)
+                                                .resizable()
+                                                .scaledToFill()
+                                                .frame(width: 100, height: 100)
+                                                .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                                            Button {
+                                                editImagesData.remove(at: index)
+                                            } label: {
+                                                Image(systemName: "xmark.circle.fill")
+                                                    .foregroundStyle(.white, .red)
+                                                    .font(.title3)
+                                            }
+                                            .offset(x: 6, y: -6)
+                                        }
+                                    }
+                                }
+                            }
+                            .padding(.vertical, 8)
                         }
-                        
-                        Button(role: .destructive) {
-                            editImageData = nil
-                            selectedPhotoItem = nil
-                        } label: {
+                    }
+
+                    // 写真追加ボタン
+                    if editImagesData.count < maxPhotos {
+                        PhotosPicker(
+                            selection: $selectedPhotoItems,
+                            maxSelectionCount: maxPhotos - editImagesData.count,
+                            matching: .images
+                        ) {
                             HStack {
                                 Spacer()
-                                Label("写真を削除", systemImage: "trash")
+                                Label("写真を追加", systemImage: "photo.badge.plus")
                                 Spacer()
                             }
                         }
-                    }
-                    
-                    PhotosPicker(
-                        selection: $selectedPhotoItem,
-                        matching: .images
-                    ) {
-                        HStack {
-                            Spacer()
-                            Label(editImageData == nil ? "写真を追加" : "写真を変更", systemImage: "photo")
-                            Spacer()
-                        }
-                    }
-                    .onChange(of: selectedPhotoItem) { oldValue, newValue in
-                        Task {
-                            if let data = try? await newValue?.loadTransferable(type: Data.self) {
-                                editImageData = data
+                        .onChange(of: selectedPhotoItems) { oldValue, newValue in
+                            Task {
+                                for item in newValue {
+                                    if let data = try? await item.loadTransferable(type: Data.self) {
+                                        if editImagesData.count < maxPhotos {
+                                            editImagesData.append(data)
+                                        }
+                                    }
+                                }
+                                selectedPhotoItems = []
                             }
                         }
+                    } else {
+                        Text("写真は最大\(maxPhotos)枚までです")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
-                
+
                 // 削除セクション
                 Section {
                     Button(role: .destructive) {
@@ -1183,7 +1256,8 @@ struct JourneyLogDetailView: View {
             log.visitDate = editDate
             if index == 0 {
                 log.memo = editMemo
-                log.imageData = editImageData
+                log.imagesData = editImagesData
+                log.imageData = nil  // 新形式に移行
             }
         }
         try? modelContext.save()

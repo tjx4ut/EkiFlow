@@ -20,9 +20,11 @@ struct TripInputView: View {
     @State private var tripDate = Date()  // 訪問日
     @State private var showingError = false
     @State private var errorMessage = ""
-    @State private var selectedPhotoItem: PhotosPickerItem? = nil
-    @State private var selectedImageData: Data? = nil
-    
+    @State private var selectedPhotoItems: [PhotosPickerItem] = []
+    @State private var selectedImagesData: [Data] = []
+
+    private let maxPhotos = 10
+
     // 複数経路用
     @State private var savedRoutes: [[RouteStop]] = []  // 保存済みの経路リスト
     
@@ -452,58 +454,75 @@ struct TripInputView: View {
     }
     
     private var memoSection: some View {
-        Section("訪問日・メモ・写真") {
+        Section("訪問日・メモ・写真（\(selectedImagesData.count)/\(maxPhotos)枚）") {
             DatePicker(
                 "訪問日",
                 selection: $tripDate,
                 displayedComponents: [.date]
             )
             .datePickerStyle(.compact)
-            
+
             TextField("旅行の思い出など（任意）", text: $memo, axis: .vertical)
                 .lineLimit(3...6)
-            
-            // 写真選択
-            if let imageData = selectedImageData,
-               let uiImage = UIImage(data: imageData) {
-                HStack {
-                    Spacer()
-                    Image(uiImage: uiImage)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(maxHeight: 200)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                    Spacer()
+
+            // 写真表示
+            if !selectedImagesData.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 12) {
+                        ForEach(Array(selectedImagesData.enumerated()), id: \.offset) { index, imageData in
+                            if let uiImage = UIImage(data: imageData) {
+                                ZStack(alignment: .topTrailing) {
+                                    Image(uiImage: uiImage)
+                                        .resizable()
+                                        .scaledToFill()
+                                        .frame(width: 100, height: 100)
+                                        .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                                    Button {
+                                        selectedImagesData.remove(at: index)
+                                    } label: {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .foregroundStyle(.white, .red)
+                                            .font(.title3)
+                                    }
+                                    .offset(x: 6, y: -6)
+                                }
+                            }
+                        }
+                    }
+                    .padding(.vertical, 8)
                 }
-                
-                Button(role: .destructive) {
-                    selectedImageData = nil
-                    selectedPhotoItem = nil
-                } label: {
+            }
+
+            // 写真追加ボタン
+            if selectedImagesData.count < maxPhotos {
+                PhotosPicker(
+                    selection: $selectedPhotoItems,
+                    maxSelectionCount: maxPhotos - selectedImagesData.count,
+                    matching: .images
+                ) {
                     HStack {
                         Spacer()
-                        Label("写真を削除", systemImage: "trash")
+                        Label("写真を追加", systemImage: "photo.badge.plus")
                         Spacer()
                     }
                 }
-            }
-            
-            PhotosPicker(
-                selection: $selectedPhotoItem,
-                matching: .images
-            ) {
-                HStack {
-                    Spacer()
-                    Label(selectedImageData == nil ? "写真を追加" : "写真を変更", systemImage: "photo")
-                    Spacer()
-                }
-            }
-            .onChange(of: selectedPhotoItem) { oldValue, newValue in
-                Task {
-                    if let data = try? await newValue?.loadTransferable(type: Data.self) {
-                        selectedImageData = data
+                .onChange(of: selectedPhotoItems) { oldValue, newValue in
+                    Task {
+                        for item in newValue {
+                            if let data = try? await item.loadTransferable(type: Data.self) {
+                                if selectedImagesData.count < maxPhotos {
+                                    selectedImagesData.append(data)
+                                }
+                            }
+                        }
+                        selectedPhotoItems = []
                     }
                 }
+            } else {
+                Text("写真は最大\(maxPhotos)枚までです")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -624,7 +643,7 @@ struct TripInputView: View {
                     status: status,
                     visitDate: tripDate,
                     memo: isFirstLog ? memo : "",
-                    imageData: isFirstLog ? selectedImageData : nil,
+                    imagesData: isFirstLog ? selectedImagesData : [],
                     tripId: tripId,
                     journeyId: journeyId,
                     autoGenerated: index != 0 && index != route.count - 1
