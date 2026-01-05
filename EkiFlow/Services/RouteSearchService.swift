@@ -206,7 +206,19 @@ class RouteSearchService {
     func getAllStations() -> [RailwayStation] {
         return stations
     }
-    
+
+    /// 徒歩接続駅を取得
+    func getWalkingConnections(for stationId: String) -> [(station: RailwayStation, duration: Int)] {
+        guard let neighbors = adjacencyList[stationId] else { return [] }
+
+        return neighbors
+            .filter { $0.line == "徒歩" }
+            .compactMap { neighbor -> (station: RailwayStation, duration: Int)? in
+                guard let station = stationById[neighbor.neighbor] else { return nil }
+                return (station: station, duration: neighbor.duration)
+            }
+    }
+
     /// ルートの所要時間を計算（分）
     func calculateRouteDuration(route: [RouteStop]) -> Int {
         guard route.count > 1 else { return 0 }

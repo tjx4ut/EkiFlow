@@ -47,7 +47,10 @@ struct StationDetailView: View {
                     
                     // 路線情報
                     linesSection
-                    
+
+                    // 徒歩接続
+                    walkingConnectionsSection
+
                     // ログ履歴
                     logsSection
                 }
@@ -180,7 +183,67 @@ struct StationDetailView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
-    
+
+    @State private var walkingStationForDetail: Station? = nil
+
+    @ViewBuilder
+    private var walkingConnectionsSection: some View {
+        let connections = RouteSearchService.shared.getWalkingConnections(for: station.id)
+
+        if !connections.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Image(systemName: "figure.walk")
+                        .foregroundStyle(.orange)
+                    Text("徒歩接続")
+                        .font(.headline)
+                }
+
+                ForEach(connections, id: \.station.id) { connection in
+                    Button {
+                        walkingStationForDetail = Station(
+                            id: connection.station.id,
+                            name: connection.station.name,
+                            prefecture: connection.station.prefecture,
+                            latitude: connection.station.latitude,
+                            longitude: connection.station.longitude
+                        )
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(connection.station.name)
+                                    .font(.body)
+                                    .foregroundStyle(.primary)
+                                Text(connection.station.prefecture)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Spacer()
+
+                            Text("約\(connection.duration)分")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+
+                            Image(systemName: "chevron.right")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                        }
+                        .padding(.vertical, 8)
+                        .padding(.horizontal, 12)
+                        .background(Color.orange.opacity(0.1))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .sheet(item: $walkingStationForDetail) { station in
+                StationDetailView(station: station, showCloseButton: true)
+            }
+        }
+    }
+
     private var logsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("履歴")
