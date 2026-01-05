@@ -525,21 +525,26 @@ struct LineDetailView: View {
     
     private func applyStatusToSelected(_ status: LogStatus) {
         isProcessing = true
-        
+
         // UIの更新を先に行うため、少し遅延させて処理
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            for stationId in selectedStationIds {
-                if let station = lineStations.first(where: { $0.id == stationId }) {
-                    let log = StationLog(
-                        stationId: stationId,
-                        stationName: station.name,
-                        status: status,
-                        memo: "路線一括登録: \(lineName)"
-                    )
-                    modelContext.insert(log)
-                }
+            // グループ化用のtripIdを生成
+            let tripId = UUID()
+
+            // 路線順に並んだ駅を取得（選択された駅のみ）
+            let orderedSelectedStations = lineStations.filter { selectedStationIds.contains($0.id) }
+
+            for station in orderedSelectedStations {
+                let log = StationLog(
+                    stationId: station.id,
+                    stationName: station.name,
+                    status: status,
+                    memo: "路線一括登録: \(lineName)",
+                    tripId: tripId
+                )
+                modelContext.insert(log)
             }
-            
+
             // 保存
             do {
                 try modelContext.save()
@@ -547,7 +552,7 @@ struct LineDetailView: View {
             } catch {
                 print("Error saving: \(error)")
             }
-            
+
             // 選択解除して通常モードに戻る
             selectedStationIds.removeAll()
             isSelectionMode = false

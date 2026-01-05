@@ -97,11 +97,12 @@ struct MapView: View {
                             longitude: station.longitude
                         )
                     ) {
-                        StationMarker(status: .passed)
-                            .onTapGesture { selectedStation = station }
+                        TappableStationMarker(status: .passed) {
+                            selectedStation = station
+                        }
                     }
                 }
-                
+
                 // 2. 乗換（薄桜）
                 ForEach(stationsWithStatus(.transferred)) { station in
                     Annotation(
@@ -111,11 +112,12 @@ struct MapView: View {
                             longitude: station.longitude
                         )
                     ) {
-                        StationMarker(status: .transferred)
-                            .onTapGesture { selectedStation = station }
+                        TappableStationMarker(status: .transferred) {
+                            selectedStation = station
+                        }
                     }
                 }
-                
+
                 // 3. 行った（ピンク）
                 ForEach(stationsWithStatus(.visited)) { station in
                     Annotation(
@@ -125,11 +127,12 @@ struct MapView: View {
                             longitude: station.longitude
                         )
                     ) {
-                        StationMarker(status: .visited)
-                            .onTapGesture { selectedStation = station }
+                        TappableStationMarker(status: .visited) {
+                            selectedStation = station
+                        }
                     }
                 }
-                
+
                 // 4. 最寄り（緑）← 一番上
                 ForEach(stationsWithStatus(.home)) { station in
                     Annotation(
@@ -139,8 +142,9 @@ struct MapView: View {
                             longitude: station.longitude
                         )
                     ) {
-                        StationMarker(status: .home)
-                            .onTapGesture { selectedStation = station }
+                        TappableStationMarker(status: .home) {
+                            selectedStation = station
+                        }
                     }
                 }
             }
@@ -259,6 +263,22 @@ struct MapView: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - Tappable Station Marker（タップ可能なマーカー）
+
+struct TappableStationMarker: View {
+    let status: LogStatus
+    let onTap: () -> Void
+
+    var body: some View {
+        StationMarker(status: status)
+            .frame(width: 44, height: 44)  // タップ領域を広げる
+            .contentShape(Circle())
+            .onTapGesture {
+                onTap()
+            }
     }
 }
 
