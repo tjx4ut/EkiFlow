@@ -273,12 +273,24 @@ struct TappableStationMarker: View {
     let onTap: () -> Void
 
     var body: some View {
-        StationMarker(status: status)
+        Circle()
+            .fill(markerColor)
+            .frame(width: 12, height: 12)
             .frame(width: 44, height: 44)  // タップ領域を広げる
             .contentShape(Circle())
             .onTapGesture {
                 onTap()
             }
+    }
+
+    private var markerColor: Color {
+        switch status {
+        case .visited: return .sakuraPink
+        case .transferred: return .sakuraPetal
+        case .passed: return .sakuraBark
+        case .home: return .sakuraLeaf
+        case .homeRemoved: return .sakuraBark
+        }
     }
 }
 
@@ -291,10 +303,6 @@ struct StationMarker: View {
         Circle()
             .fill(markerColor)
             .frame(width: 10, height: 10)
-            .overlay(
-                Circle()
-                    .stroke(Color.white, lineWidth: 1.5)
-            )
             .shadow(color: markerColor.opacity(0.5), radius: 2)
     }
     
