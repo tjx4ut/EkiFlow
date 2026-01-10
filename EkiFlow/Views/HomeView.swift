@@ -95,10 +95,17 @@ struct HomeView: View {
             .onAppear {
                 loadDataAsync()
             }
+            .onChange(of: viewModel.allStations.count) { _, newCount in
+                // 駅データが読み込まれたら再度ロードを試みる
+                if newCount > 0 && !isDataLoaded {
+                    loadDataAsync()
+                }
+            }
         }
     }
 
     private func loadDataAsync() {
+        // 駅データがまだ空なら待機
         guard !viewModel.allStations.isEmpty else { return }
 
         // 既にロード済みなら即表示
