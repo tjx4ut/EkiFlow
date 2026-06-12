@@ -1014,28 +1014,31 @@ class RouteSearchService {
                 i = j + 1
             }
 
-            // 途中駅から分岐して後方の駅で合流できる路線も、その分岐駅の選択肢に加える
-            // （例: 新宿→船橋の総武線ルートで、飯田橋の行に東西線を出して西船橋まで差し替え可能にする）
+            // 途中駅から分岐して後方の駅で合流できる路線も選択肢に加える
+            // （例: 新宿→船橋の総武線ルートで、飯田橋に東西線を出して西船橋まで差し替え可能にする）
+            // 通過駅ならその駅自身の選択肢に、乗換駅・出発駅なら「乗換後の区間」（次の駅）の選択肢に入れる
             if path.count >= 4 {
-                for p in 1..<(path.count - 2) {
+                for p in 0..<(path.count - 2) {
                     guard let station = stationById[path[p].id] else { continue }
+                    let isBoundary = path[p].line != path[p + 1].line  // 出発駅・乗換駅
+                    let targetIndex = isBoundary ? p + 1 : p
                     var added = false
                     for candidate in station.lines
                     where candidate != path[p].line
                         && candidate != path[p + 1].line
-                        && !stops[p].alternativeLines.contains(candidate) {
+                        && !stops[targetIndex].alternativeLines.contains(candidate) {
                         // 後方の駅のうち、この路線で直接行ける最遠の駅を探す
                         for q in stride(from: path.count - 1, through: p + 2, by: -1) {
                             guard let target = stationById[path[q].id], target.lines.contains(candidate) else { continue }
                             if pathAlongLine(candidate, from: path[p].id, to: path[q].id) != nil {
-                                stops[p].alternativeLines.append(candidate)
+                                stops[targetIndex].alternativeLines.append(candidate)
                                 added = true
                                 break
                             }
                         }
                     }
                     if added {
-                        stops[p].alternativeLines.sort()
+                        stops[targetIndex].alternativeLines.sort()
                     }
                 }
             }
@@ -1101,13 +1104,16 @@ class RouteSearchService {
                                 fromId: firstStop.stationId, toId: lastStop.stationId)
         }
 
-        // 2) 選んだ駅から分岐して後方の駅で合流するケース（例: 飯田橋から東西線で西船橋へ）
-        let branchFromId = route[stopIndex].stationId
-        for q in stride(from: route.count - 1, through: stopIndex + 2, by: -1) {
-            if let branchPath = pathAlongLine(newLine, from: branchFromId, to: route[q].stationId) {
-                return rebuildRoute(route: route, replaceFrom: stopIndex, replaceTo: q,
-                                    segmentPath: branchPath, newLine: newLine,
-                                    fromId: firstStop.stationId, toId: lastStop.stationId)
+        // 2) 分岐して後方の駅で合流するケース（例: 飯田橋から東西線で西船橋へ）
+        // 起点はタップした駅（通過駅メニュー）→ 区間の乗車駅（乗換後メニュー）の順で試す
+        for originIndex in [stopIndex, start - 1] {
+            let originId = route[originIndex].stationId
+            for q in stride(from: route.count - 1, through: originIndex + 2, by: -1) {
+                if let branchPath = pathAlongLine(newLine, from: originId, to: route[q].stationId) {
+                    return rebuildRoute(route: route, replaceFrom: originIndex, replaceTo: q,
+                                        segmentPath: branchPath, newLine: newLine,
+                                        fromId: firstStop.stationId, toId: lastStop.stationId)
+                }
             }
         }
 

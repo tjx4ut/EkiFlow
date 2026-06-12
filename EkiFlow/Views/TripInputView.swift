@@ -295,16 +295,22 @@ struct TripInputView: View {
                 if stop.status == .pass {
                     // 通過駅：収納時は非表示
                     if showPassStations {
-                        RouteStopRow(stop: stop) { newLine in
+                        RouteStopRow(stop: stop, isDimmed: true) { newLine in
                             updateLine(at: index, newLine: newLine)
                         }
-                        .opacity(0.6)
                     }
                 } else {
-                    // 主要駅は常に表示
-                    RouteStopRow(stop: stop) { newLine in
-                        updateLine(at: index, newLine: newLine)
-                    }
+                    // 主要駅は常に表示（乗換駅・出発駅は乗換後の路線も選択可能）
+                    RouteStopRow(
+                        stop: stop,
+                        nextStop: index + 1 < currentRoute.count ? currentRoute[index + 1] : nil,
+                        onLineSelected: { newLine in
+                            updateLine(at: index, newLine: newLine)
+                        },
+                        onDepartingLineSelected: { newLine in
+                            updateLine(at: index + 1, newLine: newLine)
+                        }
+                    )
                     
                     // 次の通過駅群の前に「通過駅を表示」ボタンを配置
                     if !showPassStations && hasPassStationsAfter(index: index) {
@@ -689,66 +695,42 @@ struct TripInputView: View {
 
 struct RouteStopRow: View {
     let stop: RouteStop
-    var onLineSelected: ((String) -> Void)? = nil
-    
+    var nextStop: RouteStop? = nil  // 乗換駅・出発駅のとき: 乗換後の区間の先頭駅（乗車路線の表示・選択用）
+    var isDimmed: Bool = false  // 通過駅の減光（路線選択メニューは通常の明るさを保つ）
+    var onLineSelected: ((String) -> Void)? = nil           // 乗換前（到着）路線の変更
+    var onDepartingLineSelected: ((String) -> Void)? = nil  // 乗換後（出発）路線の変更
+
+    private var contentOpacity: Double { isDimmed ? 0.6 : 1.0 }
+
+    /// 乗換駅・出発駅では「この駅から乗る路線」も表示する
+    private var showsDepartingLine: Bool {
+        stop.status == .transfer || stop.status == .departure
+    }
+
     var body: some View {
         HStack {
             Image(systemName: iconName)
                 .foregroundStyle(statusColor)
                 .frame(width: 24)
-            
+                .opacity(contentOpacity)
+
             VStack(alignment: .leading, spacing: 2) {
                 Text(stop.stationName)
                     .font(.body)
-                
-                // 路線表示（代替路線がある場合は選択可能）
-                if let line = stop.line {
-                    if stop.alternativeLines.count > 1, let onLineSelected = onLineSelected {
-                        // 複数路線から選択可能
-                        Menu {
-                            ForEach(stop.alternativeLines, id: \.self) { altLine in
-                                Button {
-                                    onLineSelected(altLine)
-                                } label: {
-                                    HStack {
-                                        if altLine == "徒歩" {
-                                            Label(altLine, systemImage: "figure.walk")
-                                        } else {
-                                            Text(altLine)
-                                        }
-                                        if altLine == line {
-                                            Image(systemName: "checkmark")
-                                        }
-                                    }
-                                }
-                            }
-                        } label: {
-                            HStack(spacing: 4) {
-                                if line == "徒歩" {
-                                    Label("徒歩で移動", systemImage: "figure.walk")
-                                        .font(.caption)
-                                        .foregroundStyle(.orange)
-                                } else {
-                                    Text(line)
-                                        .font(.caption)
-                                        .foregroundStyle(.blue)
-                                }
-                                Image(systemName: "chevron.down")
-                                    .font(.caption2)
-                                    .foregroundStyle(.blue)
-                            }
-                        }
-                    } else {
-                        // 単一路線（選択不可）
-                        if line == "徒歩" {
-                            Label("徒歩で移動", systemImage: "figure.walk")
-                                .font(.caption)
-                                .foregroundStyle(.orange)
-                        } else {
-                            Text(line)
-                                .font(.caption)
+                    .opacity(contentOpacity)
+
+                // 路線表示（乗換駅・出発駅は「乗換前 → 乗換後」の両方を表示）
+                HStack(spacing: 6) {
+                    if let line = stop.line {
+                        lineSelector(line: line, alternatives: stop.alternativeLines, onSelect: onLineSelected)
+                    }
+                    if showsDepartingLine, let next = nextStop, let departingLine = next.line {
+                        if stop.line != nil {
+                            Image(systemName: "arrow.right")
+                                .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
+                        lineSelector(line: departingLine, alternatives: next.alternativeLines, onSelect: onDepartingLineSelected)
                     }
                 }
             }
@@ -762,10 +744,63 @@ struct RouteStopRow: View {
                 .background(statusColor.opacity(0.2))
                 .foregroundStyle(statusColor)
                 .clipShape(Capsule())
+                .opacity(contentOpacity)
         }
         .padding(.vertical, 4)
     }
-    
+
+    /// 路線ラベル（代替路線がある場合は選択メニュー付き）
+    @ViewBuilder
+    private func lineSelector(line: String, alternatives: [String], onSelect: ((String) -> Void)?) -> some View {
+        if alternatives.count > 1, let onSelect = onSelect {
+            // 複数路線から選択可能
+            Menu {
+                ForEach(alternatives, id: \.self) { altLine in
+                    Button {
+                        onSelect(altLine)
+                    } label: {
+                        HStack {
+                            if altLine == "徒歩" {
+                                Label(altLine, systemImage: "figure.walk")
+                            } else {
+                                Text(altLine)
+                            }
+                            if altLine == line {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    if line == "徒歩" {
+                        Label("徒歩で移動", systemImage: "figure.walk")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    } else {
+                        Text(line)
+                            .font(.caption)
+                            .foregroundStyle(.blue)
+                    }
+                    Image(systemName: "chevron.down")
+                        .font(.caption2)
+                        .foregroundStyle(.blue)
+                }
+            }
+        } else {
+            // 単一路線（選択不可）
+            if line == "徒歩" {
+                Label("徒歩で移動", systemImage: "figure.walk")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            } else {
+                Text(line)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
     private var iconName: String {
         switch stop.status {
         case .departure: return "arrow.up.circle.fill"
