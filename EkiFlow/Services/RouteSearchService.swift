@@ -995,42 +995,140 @@ class RouteSearchService {
                     let edgeLines = Set(getAlternativeLines(from: path[k - 1].id, to: path[k].id))
                     common = common.map { $0.intersection(edgeLines) } ?? edgeLines
                 }
-                let alternatives = (common ?? []).sorted()
+                var alternativeSet = common ?? []
+
+                // 区間の両端駅を単一路線で直接結べる路線も選択肢に加える
+                // （経由駅が異なる並走ルート: 飯田橋～西船橋の東西線 vs 総武線など）
+                let boardId = path[i - 1].id
+                let alightId = path[j].id
+                if let board = stationById[boardId], let alight = stationById[alightId] {
+                    let candidates = Set(board.lines).intersection(alight.lines).subtracting(alternativeSet)
+                    for candidate in candidates where pathAlongLine(candidate, from: boardId, to: alightId) != nil {
+                        alternativeSet.insert(candidate)
+                    }
+                }
+                let alternatives = alternativeSet.sorted()
                 for k in i...j {
                     stops[k].alternativeLines = alternatives
                 }
                 i = j + 1
+            }
+
+            // 途中駅から分岐して後方の駅で合流できる路線も、その分岐駅の選択肢に加える
+            // （例: 新宿→船橋の総武線ルートで、飯田橋の行に東西線を出して西船橋まで差し替え可能にする）
+            if path.count >= 4 {
+                for p in 1..<(path.count - 2) {
+                    guard let station = stationById[path[p].id] else { continue }
+                    var added = false
+                    for candidate in station.lines
+                    where candidate != path[p].line
+                        && candidate != path[p + 1].line
+                        && !stops[p].alternativeLines.contains(candidate) {
+                        // 後方の駅のうち、この路線で直接行ける最遠の駅を探す
+                        for q in stride(from: path.count - 1, through: p + 2, by: -1) {
+                            guard let target = stationById[path[q].id], target.lines.contains(candidate) else { continue }
+                            if pathAlongLine(candidate, from: path[p].id, to: path[q].id) != nil {
+                                stops[p].alternativeLines.append(candidate)
+                                added = true
+                                break
+                            }
+                        }
+                    }
+                    if added {
+                        stops[p].alternativeLines.sort()
+                    }
+                }
             }
         }
 
         return stops.isEmpty ? nil : stops
     }
 
-    /// 路線変更後に乗換判定を再計算したルートを返す
-    func refreshTransferStatuses(route: [RouteStop]) -> [RouteStop] {
-        return route.enumerated().map { index, stop in
-            // 出発・到着は変わらない
-            guard stop.status == .transfer || stop.status == .pass else { return stop }
+    /// 指定路線のエッジだけで2駅間を結ぶ最短経路（駅ID列）。結べない場合はnil
+    func pathAlongLine(_ line: String, from fromId: String, to toId: String) -> [String]? {
+        guard fromId != toId else { return nil }
+        var bestCost: [String: Int] = [fromId: 0]
+        var prevStation: [String: String] = [:]
+        var heap = MinHeap()
+        heap.push((cost: 0, stateKey: fromId))
 
-            let currentLine = stop.line ?? ""
-            let nextLine = index + 1 < route.count ? (route[index + 1].line ?? "") : ""
-            let isTransfer = !currentLine.isEmpty && !nextLine.isEmpty
-                && currentLine != nextLine
-                && transferPenalty(from: currentLine, to: nextLine, at: stop.stationId) > 0
-            let newStatus: RouteStop.RouteStopStatus = isTransfer ? .transfer : .pass
-
-            guard newStatus != stop.status else { return stop }
-            return RouteStop(
-                stationId: stop.stationId,
-                stationName: stop.stationName,
-                prefecture: stop.prefecture,
-                latitude: stop.latitude,
-                longitude: stop.longitude,
-                status: newStatus,
-                line: stop.line,
-                alternativeLines: stop.alternativeLines
-            )
+        while let (currentCost, currentId) = heap.pop() {
+            if let best = bestCost[currentId], best < currentCost { continue }
+            if currentId == toId {
+                var path = [toId]
+                var key = toId
+                while let prev = prevStation[key] {
+                    path.append(prev)
+                    key = prev
+                }
+                return path.reversed()
+            }
+            for (neighborId, edgeLine, duration) in adjacencyList[currentId] ?? [] where edgeLine == line {
+                let newCost = currentCost + duration
+                if bestCost[neighborId] == nil || newCost < bestCost[neighborId]! {
+                    bestCost[neighborId] = newCost
+                    prevStation[neighborId] = currentId
+                    heap.push((cost: newCost, stateKey: neighborId))
+                }
+            }
         }
+        return nil
+    }
+
+    /// ルート内の stopIndex を含む乗車区間を、指定路線の経路で置き換えたルートを返す
+    /// 並走路線（経由駅が異なる場合）は経由駅ごと差し替え、乗換判定・代替路線も再計算される
+    func replaceSegmentLine(route: [RouteStop], stopIndex: Int, newLine: String) -> [RouteStop]? {
+        guard stopIndex > 0, stopIndex < route.count,
+              let oldLine = route[stopIndex].line, oldLine != newLine,
+              let firstStop = route.first, let lastStop = route.last else { return nil }
+
+        // 同じ路線で連続する区間の範囲
+        var start = stopIndex
+        while start > 1, route[start - 1].line == oldLine {
+            start -= 1
+        }
+        var end = stopIndex
+        while end + 1 < route.count, route[end + 1].line == oldLine {
+            end += 1
+        }
+
+        // 1) 区間全体の置き換え：乗車駅（区間の直前の駅）から降車駅まで新路線で結ぶ
+        let boardId = route[start - 1].stationId
+        let alightId = route[end].stationId
+        if let segmentPath = pathAlongLine(newLine, from: boardId, to: alightId) {
+            return rebuildRoute(route: route, replaceFrom: start - 1, replaceTo: end,
+                                segmentPath: segmentPath, newLine: newLine,
+                                fromId: firstStop.stationId, toId: lastStop.stationId)
+        }
+
+        // 2) 選んだ駅から分岐して後方の駅で合流するケース（例: 飯田橋から東西線で西船橋へ）
+        let branchFromId = route[stopIndex].stationId
+        for q in stride(from: route.count - 1, through: stopIndex + 2, by: -1) {
+            if let branchPath = pathAlongLine(newLine, from: branchFromId, to: route[q].stationId) {
+                return rebuildRoute(route: route, replaceFrom: stopIndex, replaceTo: q,
+                                    segmentPath: branchPath, newLine: newLine,
+                                    fromId: firstStop.stationId, toId: lastStop.stationId)
+            }
+        }
+
+        return nil
+    }
+
+    /// route の replaceFrom...replaceTo の部分を segmentPath（新路線の駅列）で差し替えて再構築
+    private func rebuildRoute(route: [RouteStop], replaceFrom: Int, replaceTo: Int,
+                              segmentPath: [String], newLine: String,
+                              fromId: String, toId: String) -> [RouteStop]? {
+        var newPath: [(id: String, line: String)] = []
+        for k in 0...replaceFrom {
+            newPath.append((route[k].stationId, route[k].line ?? ""))
+        }
+        for stationId in segmentPath.dropFirst() {
+            newPath.append((stationId, newLine))
+        }
+        for k in (replaceTo + 1)..<route.count {
+            newPath.append((route[k].stationId, route[k].line ?? ""))
+        }
+        return buildRouteStops(path: newPath, fromId: fromId, toId: toId, isPartial: false)
     }
     
     /// 2つの駅間で使える全ての路線を取得
