@@ -353,7 +353,24 @@ struct TripInputView: View {
     
     private func updateLine(at index: Int, newLine: String) {
         guard selectedRouteIndex < routes.count else { return }
-        routes[selectedRouteIndex][index].line = newLine
+        var route = routes[selectedRouteIndex]
+        guard index < route.count, let oldLine = route[index].line, oldLine != newLine else { return }
+
+        // 同じ路線で連続する区間をまとめて変更（1駅ずつではなく区間単位で切り替える）
+        var start = index
+        while start > 0, route[start - 1].line == oldLine {
+            start -= 1
+        }
+        var end = index
+        while end + 1 < route.count, route[end + 1].line == oldLine {
+            end += 1
+        }
+        for i in start...end {
+            route[i].line = newLine
+        }
+
+        // 路線変更で乗換駅が変わりうるので判定を再計算
+        routes[selectedRouteIndex] = RouteSearchService.shared.refreshTransferStatuses(route: route)
     }
     
     private func hasPassStationsAfter(index: Int) -> Bool {
@@ -580,7 +597,9 @@ struct TripInputView: View {
                 foundRoutes = RouteSearchService.shared.findRouteVia(
                     fromId: departure.id,
                     toId: arrival.id,
-                    viaIds: viaStations.map { $0.id }
+                    viaIds: viaStations.map { $0.id },
+                    useShinkansen: shinkansen,
+                    useLimitedExpress: limitedExpress
                 )
             }
             

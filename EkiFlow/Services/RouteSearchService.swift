@@ -102,7 +102,11 @@ class RouteSearchService {
             }
             
             // 隣接リスト構築（所要時間付き）
+            // 駅リストに存在しないIDを参照する接続（廃線の残骸）は除外する
             for connection in connections {
+                guard stationById[connection.from] != nil, stationById[connection.to] != nil else {
+                    continue
+                }
                 if adjacencyList[connection.from] == nil {
                     adjacencyList[connection.from] = []
                 }
@@ -227,14 +231,13 @@ class RouteSearchService {
         for i in 0..<(route.count - 1) {
             let fromId = route[i].stationId
             let toId = route[i + 1].stationId
-            
-            // 隣接リストから所要時間を取得
+            let chosenLine = route[i + 1].line
+
+            // 隣接リストから所要時間を取得（選択中の路線のエッジを優先）
             if let neighbors = adjacencyList[fromId] {
-                if let edge = neighbors.first(where: { $0.neighbor == toId }) {
-                    totalDuration += edge.duration
-                } else {
-                    totalDuration += 3  // デフォルト3分
-                }
+                let edge = neighbors.first(where: { $0.neighbor == toId && $0.line == chosenLine })
+                    ?? neighbors.first(where: { $0.neighbor == toId })
+                totalDuration += edge?.duration ?? 3  // 見つからない場合はデフォルト3分
             } else {
                 totalDuration += 3
             }
@@ -525,17 +528,45 @@ class RouteSearchService {
             }
         }
         
-        // スコア（所要時間 + 乗り換えペナルティ）でソート
-        return results
-            .sorted { ($0.duration + $0.transfers * transferPenalty) < ($1.duration + $1.transfers * transferPenalty) }
-            .prefix(maxRoutes)
-            .map { $0.route }
+        return selectDiverseRoutes(results, maxRoutes: maxRoutes, transferPenalty: transferPenalty)
     }
-    
+
+    /// スコア（所要時間 + 乗り換えペナルティ）順に選ぶが、既に選んだルートと
+    /// 駅の大半が重複する微差ルートは後回しにして、構成の違うルート（並走路線など）を優先する
+    private func selectDiverseRoutes(_ results: [(route: [RouteStop], duration: Int, transfers: Int)], maxRoutes: Int, transferPenalty: Int) -> [[RouteStop]] {
+        let sorted = results.sorted { ($0.duration + $0.transfers * transferPenalty) < ($1.duration + $1.transfers * transferPenalty) }
+
+        var selected: [(route: [RouteStop], duration: Int, transfers: Int)] = []
+        var redundant: [(route: [RouteStop], duration: Int, transfers: Int)] = []
+        for candidate in sorted {
+            if selected.count >= maxRoutes { break }
+            let isMinorVariation = selected.contains { stationOverlapRatio($0.route, candidate.route) > 0.8 }
+            if isMinorVariation {
+                redundant.append(candidate)
+            } else {
+                selected.append(candidate)
+            }
+        }
+        // 多様なルートだけでは枠が埋まらなければ微差ルートで補充
+        if selected.count < maxRoutes {
+            selected.append(contentsOf: redundant.prefix(maxRoutes - selected.count))
+        }
+        return selected.map { $0.route }
+    }
+
+    /// 2ルートの駅の重複率（駅数が少ない方のルート基準）
+    private func stationOverlapRatio(_ a: [RouteStop], _ b: [RouteStop]) -> Double {
+        let setA = Set(a.map { $0.stationId })
+        let setB = Set(b.map { $0.stationId })
+        guard !setA.isEmpty, !setB.isEmpty else { return 0 }
+        let intersection = setA.intersection(setB).count
+        return Double(intersection) / Double(min(setA.count, setB.count))
+    }
+
     // MARK: - Via Station Route Search
     
     /// 経由駅を通るルート検索（複数ルート対応）
-    func findRouteVia(fromId: String, toId: String, viaIds: [String], maxRoutes: Int = 5) -> [[RouteStop]] {
+    func findRouteVia(fromId: String, toId: String, viaIds: [String], maxRoutes: Int = 5, useShinkansen: Bool = true, useLimitedExpress: Bool = true) -> [[RouteStop]] {
         var results: [(route: [RouteStop], duration: Int, transfers: Int)] = []
         var usedPaths: Set<String> = []
         
@@ -560,7 +591,7 @@ class RouteSearchService {
             var success = true
             
             for i in 0..<(allPoints.count - 1) {
-                guard let result = dijkstraPath(from: allPoints[i], to: allPoints[i+1], excludedEdges: excludedEdges) else {
+                guard let result = dijkstraPath(from: allPoints[i], to: allPoints[i+1], excludedEdges: excludedEdges, useShinkansen: useShinkansen, useLimitedExpress: useLimitedExpress) else {
                     success = false
                     break
                 }
@@ -589,41 +620,231 @@ class RouteSearchService {
             if results.count >= maxRoutes { break }
         }
         
-        return results
-            .sorted { ($0.duration + $0.transfers * transferPenalty) < ($1.duration + $1.transfers * transferPenalty) }
-            .prefix(maxRoutes)
-            .map { $0.route }
+        return selectDiverseRoutes(results, maxRoutes: maxRoutes, transferPenalty: transferPenalty)
     }
-    
+
+    // MARK: - Transfer Penalty（乗換コスト）
+
+    /// 直通運転している路線ペア（路線ラベルは変わるが同一列車で乗換不要）
+    /// キーは2路線名をソートして "|" で結合したもの
+    private static let throughServicePairs: Set<String> = {
+        let pairs: [(String, String)] = [
+            // 首都圏JR
+            ("上野東京ライン", "JR東海道本線(東京～熱海)"),
+            ("上野東京ライン", "宇都宮線"),
+            ("上野東京ライン", "JR高崎線"),
+            ("上野東京ライン", "JR常磐線(上野～取手)"),
+            ("JR湘南新宿ライン", "宇都宮線"),
+            ("JR湘南新宿ライン", "JR高崎線"),
+            ("JR湘南新宿ライン", "JR横須賀線"),
+            ("JR湘南新宿ライン", "JR東海道本線(東京～熱海)"),
+            ("JR横須賀線", "JR総武快速線"),
+            ("JR中央線(快速)", "JR青梅線"),
+            ("JR中央線(快速)", "JR中央本線(高尾～塩尻)"),
+            ("JR埼京線", "りんかい線"),
+            ("JR埼京線", "JR川越線"),
+            ("JR埼京線", "相鉄・JR直通線"),
+            ("相鉄・JR直通線", "相鉄本線"),
+            ("相鉄新横浜線", "相鉄本線"),
+            ("JR常磐線(上野～取手)", "JR常磐線(取手～いわき)"),
+            // 首都圏メトロ・私鉄
+            ("東京メトロ副都心線", "東急東横線"),
+            ("東急東横線", "みなとみらい線"),
+            ("東京メトロ副都心線", "東武東上線"),
+            ("東京メトロ有楽町線", "東武東上線"),
+            ("東京メトロ副都心線", "西武有楽町線"),
+            ("東京メトロ有楽町線", "西武有楽町線"),
+            ("西武有楽町線", "西武池袋線"),
+            ("東京メトロ半蔵門線", "東急田園都市線"),
+            ("東京メトロ半蔵門線", "東武伊勢崎線"),
+            ("東武伊勢崎線", "東武日光線"),
+            ("東京メトロ千代田線", "小田急線"),
+            ("東京メトロ千代田線", "JR常磐線(上野～取手)"),
+            ("東京メトロ日比谷線", "東武伊勢崎線"),
+            ("東京メトロ東西線", "JR中央・総武線"),
+            ("東京メトロ東西線", "東葉高速線"),
+            ("東京メトロ南北線", "東急目黒線"),
+            ("都営三田線", "東急目黒線"),
+            ("東京メトロ南北線", "埼玉高速鉄道線"),
+            ("都営浅草線", "京急本線"),
+            ("都営浅草線", "京成押上線"),
+            ("京成押上線", "京成本線"),
+            ("京急本線", "京急空港線"),
+            ("京急本線", "京急久里浜線"),
+            ("京急本線", "京急逗子線"),
+            ("京王新線", "京王線"),
+            ("京王線", "京王相模原線"),
+            ("京王線", "京王高尾線"),
+            ("小田急線", "小田急江ノ島線"),
+            ("小田急線", "小田急多摩線"),
+            ("西武池袋線", "西武秩父線"),
+            ("京成本線", "北総鉄道北総線"),
+            ("京成本線", "芝山鉄道線"),
+            // 中京
+            ("名鉄名古屋本線", "名鉄犬山線"),
+            ("名鉄名古屋本線", "名鉄常滑線"),
+            ("名鉄常滑線", "名鉄常滑・空港線"),
+            ("近鉄名古屋線", "近鉄大阪線"),
+            // 関西JR
+            ("JR京都線", "琵琶湖線"),
+            ("JR京都線", "JR神戸線(大阪～神戸)"),
+            ("JR神戸線(大阪～神戸)", "JR神戸線(神戸～姫路)"),
+            ("JR東西線", "学研都市線"),
+            ("JR東西線", "JR神戸線(大阪～神戸)"),
+            ("JR東西線", "JR宝塚線"),
+            ("大阪環状線", "阪和線(天王寺～和歌山)"),
+            ("大阪環状線", "JRゆめ咲線"),
+            ("阪和線(天王寺～和歌山)", "JR関西空港線"),
+            // 関西私鉄
+            ("大阪メトロ堺筋線", "阪急千里線"),
+            ("阪急千里線", "阪急京都本線"),
+            ("北大阪急行電鉄", "大阪メトロ御堂筋線"),
+            ("京阪本線", "京阪鴨東線"),
+            ("京阪本線", "京阪中之島線"),
+            ("近鉄大阪線", "近鉄奈良線"),
+            ("近鉄難波線", "近鉄大阪線"),
+            ("阪神なんば線", "近鉄難波線"),
+            ("阪神なんば線", "阪神本線"),
+            ("近鉄京都線", "京都市営地下鉄烏丸線"),
+            ("近鉄京都線", "近鉄橿原線"),
+            ("近鉄けいはんな線", "大阪メトロ中央線"),
+            ("近鉄南大阪線", "近鉄吉野線"),
+            // 新幹線
+            ("東海道新幹線", "山陽新幹線"),
+            ("山陽新幹線", "九州新幹線"),
+            ("東北新幹線", "北海道新幹線"),
+            ("東北新幹線", "山形新幹線"),
+            ("東北新幹線", "秋田新幹線"),
+            ("東北新幹線", "上越新幹線"),
+            ("東北新幹線", "北陸新幹線"),
+            ("上越新幹線", "北陸新幹線"),
+            // 九州・東北
+            ("福岡市営地下鉄空港線", "JR筑肥線(姪浜～西唐津)"),
+            ("仙台空港線", "JR東北本線(黒磯～利府・盛岡)"),
+        ]
+        return Set(pairs.map { pairKey($0.0, $0.1) })
+    }()
+
+    /// 直通が特定の駅でのみ成立するペア（両線が通るが直通はしない駅があるペアのみ登録）
+    /// 例: 東西線と総武線は飯田橋でも交差するが、直通運転は中野・西船橋のみ
+    private static let throughServiceStationRestrictions: [String: Set<String>] = [
+        pairKey("東京メトロ東西線", "JR中央・総武線"): ["中野", "西船橋"],
+        pairKey("東京メトロ副都心線", "東武東上線"): ["和光市"],
+        pairKey("東京メトロ有楽町線", "東武東上線"): ["和光市"],
+        pairKey("近鉄京都線", "京都市営地下鉄烏丸線"): ["竹田"],
+        pairKey("東京メトロ千代田線", "JR常磐線(上野～取手)"): ["綾瀬"],
+    ]
+
+    private static func pairKey(_ a: String, _ b: String) -> String {
+        a < b ? "\(a)|\(b)" : "\(b)|\(a)"
+    }
+
+    /// 2路線が直通運転しているか（駅を指定した場合、その駅で直通が成立するかを判定）
+    func isThroughService(_ a: String, _ b: String, at stationId: String? = nil) -> Bool {
+        let key = Self.pairKey(a, b)
+        guard Self.throughServicePairs.contains(key) else { return false }
+        if let restriction = Self.throughServiceStationRestrictions[key] {
+            guard let stationId, let name = stationById[stationId]?.name else { return false }
+            return restriction.contains(name)
+        }
+        return true
+    }
+
+    /// 路線の乗り継ぎにかかる実質コスト（分）
+    /// - 同一路線・直通運転・降りて徒歩: 0
+    /// - 徒歩から乗車する場合も待ち時間が発生するので通常乗換扱い
+    /// - 新幹線がらみの乗換は改札・ホーム移動が長いので重め
+    func transferPenalty(from prevLine: String, to nextLine: String, at stationId: String? = nil) -> Int {
+        if prevLine.isEmpty || prevLine == nextLine { return 0 }
+        if nextLine == "徒歩" { return 0 }
+        if isThroughService(prevLine, nextLine, at: stationId) { return 0 }
+        if prevLine.contains("新幹線") || nextLine.contains("新幹線") { return 12 }
+        return 6
+    }
+
     // MARK: - Private Methods
-    
+
+    /// ダイクストラ法のヒープ（二分ヒープ）
+    private struct MinHeap {
+        private var items: [(cost: Int, stateKey: String)] = []
+
+        var isEmpty: Bool { items.isEmpty }
+
+        mutating func push(_ item: (cost: Int, stateKey: String)) {
+            items.append(item)
+            var i = items.count - 1
+            while i > 0 {
+                let parent = (i - 1) / 2
+                if items[parent].cost <= items[i].cost { break }
+                items.swapAt(parent, i)
+                i = parent
+            }
+        }
+
+        mutating func pop() -> (cost: Int, stateKey: String)? {
+            guard !items.isEmpty else { return nil }
+            let top = items[0]
+            items[0] = items[items.count - 1]
+            items.removeLast()
+            var i = 0
+            while true {
+                let left = i * 2 + 1
+                let right = i * 2 + 2
+                var smallest = i
+                if left < items.count && items[left].cost < items[smallest].cost { smallest = left }
+                if right < items.count && items[right].cost < items[smallest].cost { smallest = right }
+                if smallest == i { break }
+                items.swapAt(i, smallest)
+                i = smallest
+            }
+            return top
+        }
+    }
+
     /// ダイクストラ法で最短時間経路を探索
+    /// 状態を「駅 × 乗っている路線」で持ち、乗換ペナルティ込みのコストを最小化する。
+    /// 返り値の totalDuration はペナルティを含まない純粋な乗車・徒歩時間。
     private func dijkstraPath(from fromId: String, to toId: String, excludedEdges: Set<String>, useShinkansen: Bool = true, useLimitedExpress: Bool = true) -> (path: [(id: String, line: String, duration: Int)], totalDuration: Int)? {
         guard stationById[fromId] != nil, stationById[toId] != nil else {
             return nil
         }
-        
-        // (総所要時間, 現在駅ID, 経路)
-        var heap: [(duration: Int, id: String, path: [(id: String, line: String, duration: Int)])] = []
-        heap.append((0, fromId, [(fromId, "", 0)]))
-        
-        var bestDuration: [String: Int] = [:]
-        bestDuration[fromId] = 0
-        
-        while !heap.isEmpty {
-            // 最小所要時間のものを取り出す（簡易実装：ソートして先頭を取る）
-            heap.sort { $0.duration < $1.duration }
-            let (currentDuration, currentId, path) = heap.removeFirst()
-            
-            // 既により短い経路で訪問済みならスキップ
-            if let best = bestDuration[currentId], best < currentDuration {
+
+        // 状態キー: "駅ID|路線名"（路線名は到着時に乗っていた路線、出発駅は空文字）
+        let startKey = "\(fromId)|"
+        var bestCost: [String: Int] = [startKey: 0]       // 乗換ペナルティ込みコスト
+        var rideDuration: [String: Int] = [startKey: 0]   // 純粋な所要時間
+        var prevState: [String: (key: String, edgeDuration: Int)] = [:]
+
+        var heap = MinHeap()
+        heap.push((cost: 0, stateKey: startKey))
+
+        while let (currentCost, currentKey) = heap.pop() {
+            // 既により小さいコストで訪問済みならスキップ（lazy deletion）
+            if let best = bestCost[currentKey], best < currentCost {
                 continue
             }
-            
+
+            let separatorIndex = currentKey.firstIndex(of: "|")!
+            let currentId = String(currentKey[..<separatorIndex])
+            let currentLine = String(currentKey[currentKey.index(after: separatorIndex)...])
+
+            // 目的地に到達（ペナルティ込みコスト順に取り出しているので最初の到達が最適）
             if currentId == toId {
-                return (path, currentDuration)
+                var path: [(id: String, line: String, duration: Int)] = []
+                var key = currentKey
+                while key != startKey {
+                    let sep = key.firstIndex(of: "|")!
+                    let stationId = String(key[..<sep])
+                    let line = String(key[key.index(after: sep)...])
+                    guard let prev = prevState[key] else { break }
+                    path.append((stationId, line, prev.edgeDuration))
+                    key = prev.key
+                }
+                path.append((fromId, "", 0))
+                path.reverse()
+                return (path, rideDuration[currentKey] ?? currentCost)
             }
-            
+
             if let neighbors = adjacencyList[currentId] {
                 for (neighborId, line, duration) in neighbors {
                     // 除外エッジをチェック
@@ -632,30 +853,30 @@ class RouteSearchService {
                     if excludedEdges.contains(edgeKey1) || excludedEdges.contains(edgeKey2) {
                         continue
                     }
-                    
+
                     // 新幹線フィルター
                     if !useShinkansen && line.contains("新幹線") {
                         continue
                     }
-                    
+
                     // 特急フィルター
                     if !useLimitedExpress && (line.contains("特急") || line.contains("エクスプレス") || line.contains("ライナー")) {
                         continue
                     }
-                    
-                    let newDuration = currentDuration + duration
-                    
-                    // まだ訪問していないか、より短い経路なら追加
-                    if bestDuration[neighborId] == nil || newDuration < bestDuration[neighborId]! {
-                        bestDuration[neighborId] = newDuration
-                        var newPath = path
-                        newPath.append((neighborId, line, duration))
-                        heap.append((newDuration, neighborId, newPath))
+
+                    let newCost = currentCost + duration + transferPenalty(from: currentLine, to: line, at: currentId)
+                    let neighborKey = "\(neighborId)|\(line)"
+
+                    if bestCost[neighborKey] == nil || newCost < bestCost[neighborKey]! {
+                        bestCost[neighborKey] = newCost
+                        rideDuration[neighborKey] = (rideDuration[currentKey] ?? 0) + duration
+                        prevState[neighborKey] = (currentKey, duration)
+                        heap.push((cost: newCost, stateKey: neighborKey))
                     }
                 }
             }
         }
-        
+
         return nil
     }
     
@@ -726,12 +947,13 @@ class RouteSearchService {
                 currentLine = line
             }
             
-            // 乗り換え検出：次の駅への路線が今と違う場合、今の駅が乗り換え駅
+            // 乗り換え検出：次の駅への路線が今と違い、かつ実際に乗換コストが発生する場合
+            // （直通運転や降車→徒歩はラベルが変わっても乗換ではない）
             var isTransfer = false
-            if !isFirst && !isLast && currentLine != nil {
+            if !isFirst && !isLast, let current = currentLine {
                 let nextLine = path[index + 1].line
-                if !nextLine.isEmpty && currentLine != nextLine {
-                    isTransfer = true
+                if !nextLine.isEmpty && current != nextLine {
+                    isTransfer = transferPenalty(from: current, to: nextLine, at: stationId) > 0
                 }
             }
             
@@ -746,13 +968,6 @@ class RouteSearchService {
                 status = .pass
             }
             
-            // 次の駅への代替路線を取得
-            var alternatives: [String] = []
-            if !isLast {
-                let nextStationId = path[index + 1].id
-                alternatives = getAlternativeLines(from: stationId, to: nextStationId)
-            }
-            
             stops.append(RouteStop(
                 stationId: station.id,
                 stationName: station.name,
@@ -761,11 +976,61 @@ class RouteSearchService {
                 longitude: station.longitude,
                 status: status,
                 line: currentLine,
-                alternativeLines: alternatives
+                alternativeLines: []
             ))
         }
-        
+
+        // 同一路線で連続する乗車区間ごとに、区間全体を通して使える代替路線を計算
+        // （各駅の line =「到着時の路線」と同じ基準。区間単位での路線選択に使う）
+        if stops.count == path.count {
+            var i = 1
+            while i < path.count {
+                var j = i
+                while j + 1 < path.count && path[j + 1].line == path[i].line {
+                    j += 1
+                }
+                // 区間内の全駅間で共通して使える路線の積集合
+                var common: Set<String>?
+                for k in i...j {
+                    let edgeLines = Set(getAlternativeLines(from: path[k - 1].id, to: path[k].id))
+                    common = common.map { $0.intersection(edgeLines) } ?? edgeLines
+                }
+                let alternatives = (common ?? []).sorted()
+                for k in i...j {
+                    stops[k].alternativeLines = alternatives
+                }
+                i = j + 1
+            }
+        }
+
         return stops.isEmpty ? nil : stops
+    }
+
+    /// 路線変更後に乗換判定を再計算したルートを返す
+    func refreshTransferStatuses(route: [RouteStop]) -> [RouteStop] {
+        return route.enumerated().map { index, stop in
+            // 出発・到着は変わらない
+            guard stop.status == .transfer || stop.status == .pass else { return stop }
+
+            let currentLine = stop.line ?? ""
+            let nextLine = index + 1 < route.count ? (route[index + 1].line ?? "") : ""
+            let isTransfer = !currentLine.isEmpty && !nextLine.isEmpty
+                && currentLine != nextLine
+                && transferPenalty(from: currentLine, to: nextLine, at: stop.stationId) > 0
+            let newStatus: RouteStop.RouteStopStatus = isTransfer ? .transfer : .pass
+
+            guard newStatus != stop.status else { return stop }
+            return RouteStop(
+                stationId: stop.stationId,
+                stationName: stop.stationName,
+                prefecture: stop.prefecture,
+                latitude: stop.latitude,
+                longitude: stop.longitude,
+                status: newStatus,
+                line: stop.line,
+                alternativeLines: stop.alternativeLines
+            )
+        }
     }
     
     /// 2つの駅間で使える全ての路線を取得
