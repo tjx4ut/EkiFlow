@@ -31,7 +31,7 @@ struct TripInputView: View {
     // ルート検索オプション
     @State private var useShinkansen = true    // 新幹線を使う
     @State private var useLimitedExpress = true  // 特急を使う
-    @State private var showPassStations = false  // 通過駅を表示
+    @State private var expandedSegments: Set<String> = []  // 通過駅を展開中の区間（直前の主要駅のstationIdで識別）
     
     var body: some View {
         NavigationStack {
@@ -286,17 +286,20 @@ struct TripInputView: View {
     }
     
     private var selectedRouteSection: some View {
-        let passCount = currentRoute.filter { $0.status == .pass }.count
-        
-        return Section("選択中のルート（\(currentRoute.count)駅）") {
+        Section("選択中のルート（\(currentRoute.count)駅）") {
             ForEach(0..<currentRoute.count, id: \.self) { index in
                 let stop = currentRoute[index]
-                
+
                 if stop.status == .pass {
-                    // 通過駅：収納時は非表示
-                    if showPassStations {
+                    // 通過駅：その区間が展開中のときだけ表示
+                    if let ownerId = segmentOwnerId(passIndex: index), expandedSegments.contains(ownerId) {
                         RouteStopRow(stop: stop, isDimmed: true) { newLine in
                             updateLine(at: index, newLine: newLine)
+                        }
+
+                        // 区間の最後の通過駅の後に「この区間を隠す」ボタン
+                        if isLastPassInSegment(index: index) {
+                            collapseButton(ownerId: ownerId)
                         }
                     }
                 } else {
@@ -311,52 +314,54 @@ struct TripInputView: View {
                             updateLine(at: index + 1, newLine: newLine)
                         }
                     )
-                    
-                    // 次の通過駅群の前に「通過駅を表示」ボタンを配置
-                    if !showPassStations && hasPassStationsAfter(index: index) {
-                        let passCountInSegment = countPassStationsAfter(index: index)
-                        Button {
-                            withAnimation {
-                                showPassStations = true
-                            }
-                        } label: {
-                            HStack {
-                                Spacer()
-                                Image(systemName: "ellipsis")
-                                Text("\(passCountInSegment)駅を表示")
-                                    .font(.caption)
-                                Spacer()
-                            }
-                            .foregroundStyle(.secondary)
-                            .padding(.vertical, 4)
-                        }
-                        .buttonStyle(.plain)
+
+                    // この駅から始まる通過駅群が収納中なら「○駅を表示」ボタン
+                    if hasPassStationsAfter(index: index), !expandedSegments.contains(stop.stationId) {
+                        expandButton(ownerId: stop.stationId, count: countPassStationsAfter(index: index))
                     }
                 }
-            }
-            
-            // 通過駅を隠すボタン
-            if showPassStations && passCount > 0 {
-                Button {
-                    withAnimation {
-                        showPassStations = false
-                    }
-                } label: {
-                    HStack {
-                        Spacer()
-                        Image(systemName: "chevron.up")
-                        Text("通過駅を隠す")
-                            .font(.caption)
-                        Spacer()
-                    }
-                    .foregroundStyle(.secondary)
-                    .padding(.vertical, 4)
-                }
-                .buttonStyle(.plain)
             }
         }
     }
-    
+
+    private func expandButton(ownerId: String, count: Int) -> some View {
+        Button {
+            withAnimation {
+                _ = expandedSegments.insert(ownerId)
+            }
+        } label: {
+            HStack {
+                Spacer()
+                Image(systemName: "ellipsis")
+                Text("\(count)駅を表示")
+                    .font(.caption)
+                Spacer()
+            }
+            .foregroundStyle(.secondary)
+            .padding(.vertical, 4)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func collapseButton(ownerId: String) -> some View {
+        Button {
+            withAnimation {
+                _ = expandedSegments.remove(ownerId)
+            }
+        } label: {
+            HStack {
+                Spacer()
+                Image(systemName: "chevron.up")
+                Text("この区間を隠す")
+                    .font(.caption)
+                Spacer()
+            }
+            .foregroundStyle(.secondary)
+            .padding(.vertical, 4)
+        }
+        .buttonStyle(.plain)
+    }
+
     private func updateLine(at index: Int, newLine: String) {
         guard selectedRouteIndex < routes.count else { return }
         let route = routes[selectedRouteIndex]
@@ -371,6 +376,24 @@ struct TripInputView: View {
     private func hasPassStationsAfter(index: Int) -> Bool {
         guard index + 1 < currentRoute.count else { return false }
         return currentRoute[index + 1].status == .pass
+    }
+
+    /// 通過駅が属する区間の識別子（直前の主要駅のstationId）
+    private func segmentOwnerId(passIndex: Int) -> String? {
+        var i = passIndex - 1
+        while i >= 0 {
+            if currentRoute[i].status != .pass {
+                return currentRoute[i].stationId
+            }
+            i -= 1
+        }
+        return nil
+    }
+
+    /// 区間内で最後の通過駅か（次が通過駅でない＝主要駅 or 末尾）
+    private func isLastPassInSegment(index: Int) -> Bool {
+        guard index + 1 < currentRoute.count else { return true }
+        return currentRoute[index + 1].status != .pass
     }
     
     private func countPassStationsAfter(index: Int) -> Int {
