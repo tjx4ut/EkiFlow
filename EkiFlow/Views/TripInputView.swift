@@ -730,7 +730,8 @@ struct RouteStopRow: View {
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
-                        lineSelector(line: departingLine, alternatives: next.alternativeLines, onSelect: onDepartingLineSelected)
+                        // 選択肢は自駅の乗車メニュー用リスト（次の駅の到着メニューとは分離されている）
+                        lineSelector(line: departingLine, alternatives: stop.departingAlternativeLines, onSelect: onDepartingLineSelected)
                     }
                 }
             }

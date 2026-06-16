@@ -49,7 +49,8 @@ struct RouteStop: Identifiable {
     let longitude: Double
     let status: RouteStopStatus
     var line: String?  // varに変更（選択可能に）
-    var alternativeLines: [String]  // 代替路線リスト
+    var alternativeLines: [String]  // 到着路線の代替リスト（この駅を通る乗車区間の選択肢）
+    var departingAlternativeLines: [String] = []  // この駅から乗る路線の選択肢（乗換駅・出発駅の乗車メニュー用）
     
     enum RouteStopStatus {
         case departure
@@ -990,55 +991,66 @@ class RouteSearchService {
                     j += 1
                 }
                 // 区間内の全駅間で共通して使える路線の積集合
+                // （同じ駅列を通る並走線: 山手線⇄京浜東北線など。途中駅で選んでも経由駅は変わらない）
                 var common: Set<String>?
                 for k in i...j {
                     let edgeLines = Set(getAlternativeLines(from: path[k - 1].id, to: path[k].id))
                     common = common.map { $0.intersection(edgeLines) } ?? edgeLines
                 }
-                var alternativeSet = common ?? []
+                let parallelLines = (common ?? []).sorted()
+                for k in i...j {
+                    stops[k].alternativeLines = parallelLines
+                }
 
-                // 区間の両端駅を単一路線で直接結べる路線も選択肢に加える
-                // （経由駅が異なる並走ルート: 飯田橋～西船橋の東西線 vs 総武線など）
+                // 区間の乗車メニュー = 並走線 + 「両端を直結するが経由駅が変わる路線」
+                // 後者は乗車駅でしか選べない差し替え（飯田橋→西船橋の東西線 vs 総武線など）なので、
+                // 区間内の通過駅には出さず、乗車駅（直前の駅）の departingAlternativeLines にだけ入れる
+                var departingSet = Set(parallelLines)
                 let boardId = path[i - 1].id
                 let alightId = path[j].id
                 if let board = stationById[boardId], let alight = stationById[alightId] {
-                    let candidates = Set(board.lines).intersection(alight.lines).subtracting(alternativeSet)
+                    let candidates = Set(board.lines).intersection(alight.lines).subtracting(departingSet)
                     for candidate in candidates where pathAlongLine(candidate, from: boardId, to: alightId) != nil {
-                        alternativeSet.insert(candidate)
+                        departingSet.insert(candidate)
                     }
                 }
-                let alternatives = alternativeSet.sorted()
-                for k in i...j {
-                    stops[k].alternativeLines = alternatives
-                }
+                stops[i - 1].departingAlternativeLines = departingSet.sorted()
                 i = j + 1
             }
 
             // 途中駅から分岐して後方の駅で合流できる路線も選択肢に加える
             // （例: 新宿→船橋の総武線ルートで、飯田橋に東西線を出して西船橋まで差し替え可能にする）
-            // 通過駅ならその駅自身の選択肢に、乗換駅・出発駅なら「乗換後の区間」（次の駅）の選択肢に入れる
+            // 通過駅ならその駅自身の選択肢に、乗換駅・出発駅なら「この駅から乗る路線」の選択肢に入れる
+            // （次の駅の alternativeLines と共有しないことで、次の駅起点の分岐が乗換駅側に混ざらないようにする）
             if path.count >= 4 {
                 for p in 0..<(path.count - 2) {
                     guard let station = stationById[path[p].id] else { continue }
                     let isBoundary = path[p].line != path[p + 1].line  // 出発駅・乗換駅
-                    let targetIndex = isBoundary ? p + 1 : p
                     var added = false
                     for candidate in station.lines
                     where candidate != path[p].line
                         && candidate != path[p + 1].line
-                        && !stops[targetIndex].alternativeLines.contains(candidate) {
+                        && !(isBoundary ? stops[p].departingAlternativeLines : stops[p].alternativeLines).contains(candidate) {
                         // 後方の駅のうち、この路線で直接行ける最遠の駅を探す
                         for q in stride(from: path.count - 1, through: p + 2, by: -1) {
                             guard let target = stationById[path[q].id], target.lines.contains(candidate) else { continue }
                             if pathAlongLine(candidate, from: path[p].id, to: path[q].id) != nil {
-                                stops[targetIndex].alternativeLines.append(candidate)
+                                if isBoundary {
+                                    stops[p].departingAlternativeLines.append(candidate)
+                                } else {
+                                    stops[p].alternativeLines.append(candidate)
+                                }
                                 added = true
                                 break
                             }
                         }
                     }
                     if added {
-                        stops[targetIndex].alternativeLines.sort()
+                        if isBoundary {
+                            stops[p].departingAlternativeLines.sort()
+                        } else {
+                            stops[p].alternativeLines.sort()
+                        }
                     }
                 }
             }
