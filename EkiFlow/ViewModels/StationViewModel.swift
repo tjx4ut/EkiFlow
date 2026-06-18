@@ -19,6 +19,7 @@ class StationViewModel: ObservableObject {
     private var modelContext: ModelContext?
     private var stationDataCache: [RailwayStation] = []
     private var stationById: [String: RailwayStation] = [:]
+    private var stationModelById: [String: Station] = [:]  // id -> Station（O(1)検索用）
     private var stationAliases: [String: [String]] = [:]  // id -> aliases
 
     // 統計キャッシュ
@@ -186,6 +187,13 @@ class StationViewModel: ObservableObject {
             self.stationById = result.byId
             self.stationAliases = result.aliases
             self.allStations = result.stations
+            // id -> Station の辞書を構築（getStationのO(1)検索用）
+            var modelById: [String: Station] = [:]
+            modelById.reserveCapacity(result.stations.count)
+            for station in result.stations {
+                modelById[station.id] = station
+            }
+            self.stationModelById = modelById
             print("✅ Loaded \(allStations.count) stations")
 
             // 初回検索を実行
@@ -349,8 +357,8 @@ class StationViewModel: ObservableObject {
             }
         }
         
-        // 最新が.homeの駅のみを返す
-        let homeIds = latestHomeStatus.filter { $0.value == .home }.map { $0.key }
+        // 最新が.homeの駅のみを返す（allStations順で安定させる）
+        let homeIds = Set(latestHomeStatus.filter { $0.value == .home }.map { $0.key })
         let result = allStations.filter { homeIds.contains($0.id) }
         cachedHomeStations = result
         return result
@@ -418,70 +426,69 @@ class StationViewModel: ObservableObject {
     }
     
     func getTotalStationCount() -> Int {
-        if let cached = cachedTotalStationCount {
-            return cached
-        }
-        
-        guard let context = modelContext else { return 0 }
-        let descriptor = FetchDescriptor<StationLog>()
-        guard let logs = try? context.fetch(descriptor) else { return 0 }
-        
-        let uniqueIds = Set(logs.map { $0.stationId })
-        cachedTotalStationCount = uniqueIds.count
-        return uniqueIds.count
+        buildStatsCacheIfNeeded()
+        return cachedTotalStationCount ?? 0
     }
-    
+
     func getStatusCount(status: LogStatus) -> Int {
-        // キャッシュがあれば使う
-        if let cached = cachedStatusCounts {
-            return cached[status] ?? 0
+        buildStatsCacheIfNeeded()
+        return cachedStatusCounts?[status] ?? 0
+    }
+
+    func getPrefectureCount() -> [String: Int] {
+        buildStatsCacheIfNeeded()
+        return cachedPrefectureCounts ?? [:]
+    }
+
+    /// 訪問駅数・ステータス別・都道府県別の統計を1回のフェッチでまとめて構築
+    /// （統計タブの初回描画で同じ全件フェッチを3回していたのを1回に集約）
+    private func buildStatsCacheIfNeeded() {
+        // いずれかが未計算なら全部まとめて作る（無効化時は3つとも同時にnilになる）
+        if cachedTotalStationCount != nil, cachedStatusCounts != nil, cachedPrefectureCounts != nil {
+            return
         }
-        
-        guard let context = modelContext else { return 0 }
+
+        guard let context = modelContext else {
+            cachedTotalStationCount = 0
+            cachedStatusCounts = [:]
+            cachedPrefectureCounts = [:]
+            return
+        }
         let descriptor = FetchDescriptor<StationLog>()
-        guard let logs = try? context.fetch(descriptor) else { return 0 }
-        
-        // 駅IDでグループ化
+        guard let logs = try? context.fetch(descriptor) else {
+            cachedTotalStationCount = 0
+            cachedStatusCounts = [:]
+            cachedPrefectureCounts = [:]
+            return
+        }
+
+        // 駅IDでグループ化（1回のループ）
         var logsByStation: [String: [StationLog]] = [:]
         for log in logs {
             logsByStation[log.stationId, default: []].append(log)
         }
-        
-        // 全ステータスのカウントを一度に計算してキャッシュ
-        var counts: [LogStatus: Int] = [:]
-        for (_, stationLogs) in logsByStation {
+
+        var statusCounts: [LogStatus: Int] = [:]
+        var prefectureCounts: [String: Int] = [:]
+        for (stationId, stationLogs) in logsByStation {
+            // ステータス別: 駅ごとの最強ステータスを集計
             if let strongest = stationLogs.map({ $0.status }).max(by: { $0.strength < $1.strength }) {
-                counts[strongest, default: 0] += 1
+                statusCounts[strongest, default: 0] += 1
             }
-        }
-        cachedStatusCounts = counts
-        return counts[status] ?? 0
-    }
-    
-    func getPrefectureCount() -> [String: Int] {
-        if let cached = cachedPrefectureCounts {
-            return cached
-        }
-        
-        guard let context = modelContext else { return [:] }
-        let descriptor = FetchDescriptor<StationLog>()
-        guard let logs = try? context.fetch(descriptor) else { return [:] }
-        
-        let loggedIds = Set(logs.map { $0.stationId })
-        var counts: [String: Int] = [:]
-        
-        for loggedId in loggedIds {
-            if let station = stationById[loggedId] {
+            // 都道府県別: ログのある駅の都道府県を集計
+            if let station = stationById[stationId] {
                 let pref = station.prefecture.isEmpty ? "不明" : station.prefecture
-                counts[pref, default: 0] += 1
+                prefectureCounts[pref, default: 0] += 1
             }
         }
-        cachedPrefectureCounts = counts
-        return counts
+
+        cachedTotalStationCount = logsByStation.count
+        cachedStatusCounts = statusCounts
+        cachedPrefectureCounts = prefectureCounts
     }
     
     func getStation(byId id: String) -> Station? {
-        return allStations.first(where: { $0.id == id })
+        return stationModelById[id]
     }
     
     /// エイリアスを取得

@@ -110,8 +110,9 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .onAppear {
-                // 少し遅延させてからViewを初期化（UIの応答性を保つ）
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                // タブ切替アニメを止めないよう、プレースホルダを1フレーム描画してから
+                // 次のランループで実Viewを生成する（固定の遅延は入れない）
+                DispatchQueue.main.async {
                     initializedTabs.insert(tab)
                 }
             }
