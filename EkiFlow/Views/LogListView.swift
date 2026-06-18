@@ -481,6 +481,10 @@ struct LogGroup: Identifiable {
         Set(logs.compactMap { $0.tripId }).count
     }
     
+    var displayEndDate: Date? {
+        logs.first?.visitEndDate
+    }
+
     var displayDate: Date? {
         logs.first?.visitDate
     }
@@ -559,9 +563,15 @@ struct SingleLogRow: View {
                     if let visitDate = log.visitDate {
                         Text("•")
                             .foregroundStyle(.secondary)
-                        Text(visitDate, style: .date)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        if let endDate = log.visitEndDate {
+                            Text("\(visitDate, style: .date)〜\(endDate, style: .date)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text(visitDate, style: .date)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
                 if !log.memo.isEmpty {
@@ -601,9 +611,15 @@ struct TripLogRow: View {
                     if let displayDate = group.displayDate {
                         Text("•")
                             .foregroundStyle(.secondary)
-                        Text(displayDate, style: .date)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        if let endDate = group.displayEndDate {
+                            Text("\(displayDate, style: .date)〜\(endDate, style: .date)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text(displayDate, style: .date)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     
                     // 写真アイコン
@@ -657,6 +673,8 @@ struct TripLogDetailView: View {
     @State private var showingEditSheet = false
     @State private var showDeleteConfirmation = false
     @State private var editDate: Date
+    @State private var editEndDate: Date?
+    @State private var editIsMultiDay: Bool
     @State private var editMemo: String
     @State private var editImagesData: [Data]
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
@@ -667,6 +685,8 @@ struct TripLogDetailView: View {
         self.group = group
         self.viewModel = viewModel
         _editDate = State(initialValue: group.displayDate ?? Date())
+        _editEndDate = State(initialValue: group.displayEndDate)
+        _editIsMultiDay = State(initialValue: group.displayEndDate != nil)
         _editMemo = State(initialValue: group.memo)
         _editImagesData = State(initialValue: group.allImages)
     }
@@ -700,8 +720,13 @@ struct TripLogDetailView: View {
                     Text("訪問日")
                     Spacer()
                     if let displayDate = group.displayDate {
-                        Text(displayDate, style: .date)
-                            .foregroundStyle(.secondary)
+                        if let endDate = group.displayEndDate {
+                            Text("\(displayDate, style: .date)〜\(endDate, style: .date)")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text(displayDate, style: .date)
+                                .foregroundStyle(.secondary)
+                        }
                     } else {
                         Text("未設定")
                             .foregroundStyle(.secondary)
@@ -753,6 +778,8 @@ struct TripLogDetailView: View {
             ToolbarItem(placement: .topBarTrailing) {
                 Button("編集") {
                     editDate = group.displayDate ?? Date()
+                    editEndDate = group.displayEndDate
+                    editIsMultiDay = group.displayEndDate != nil
                     editMemo = group.memo
                     editImagesData = group.allImages
                     selectedPhotoItems = []
@@ -769,12 +796,23 @@ struct TripLogDetailView: View {
         NavigationStack {
             Form {
                 Section("訪問日") {
-                    DatePicker(
-                        "訪問日",
-                        selection: $editDate,
-                        displayedComponents: [.date]
-                    )
-                    .datePickerStyle(.compact)
+                    Toggle("複数日選択", isOn: $editIsMultiDay)
+                        .onChange(of: editIsMultiDay) { _, newValue in
+                            if !newValue {
+                                editEndDate = nil
+                            }
+                        }
+
+                    if editIsMultiDay {
+                        RangeCalendarView(startDate: $editDate, endDate: $editEndDate)
+                    } else {
+                        DatePicker(
+                            "訪問日",
+                            selection: $editDate,
+                            displayedComponents: [.date]
+                        )
+                        .datePickerStyle(.compact)
+                    }
                 }
 
                 Section("メモ") {
@@ -897,6 +935,7 @@ struct TripLogDetailView: View {
         // グループ内の全ログを更新
         for (index, log) in group.logs.enumerated() {
             log.visitDate = editDate
+            log.visitEndDate = editIsMultiDay ? editEndDate : nil
             if index == 0 {
                 log.memo = editMemo
                 log.imagesData = editImagesData
@@ -935,9 +974,15 @@ struct JourneyLogRow: View {
                     if let displayDate = group.displayDate {
                         Text("•")
                             .foregroundStyle(.secondary)
-                        Text(displayDate, style: .date)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        if let endDate = group.displayEndDate {
+                            Text("\(displayDate, style: .date)〜\(endDate, style: .date)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text(displayDate, style: .date)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     
                     if group.hasImages {
@@ -1003,6 +1048,8 @@ struct JourneyLogDetailView: View {
     @State private var showingEditSheet = false
     @State private var showDeleteConfirmation = false
     @State private var editDate: Date
+    @State private var editEndDate: Date?
+    @State private var editIsMultiDay: Bool
     @State private var editMemo: String
     @State private var editImagesData: [Data]
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
@@ -1013,6 +1060,8 @@ struct JourneyLogDetailView: View {
         self.group = group
         self.viewModel = viewModel
         _editDate = State(initialValue: group.displayDate ?? Date())
+        _editEndDate = State(initialValue: group.displayEndDate)
+        _editIsMultiDay = State(initialValue: group.displayEndDate != nil)
         _editMemo = State(initialValue: group.memo)
         _editImagesData = State(initialValue: group.allImages)
     }
@@ -1054,8 +1103,13 @@ struct JourneyLogDetailView: View {
                     Text("訪問日")
                     Spacer()
                     if let displayDate = group.displayDate {
-                        Text(displayDate, style: .date)
-                            .foregroundStyle(.secondary)
+                        if let endDate = group.displayEndDate {
+                            Text("\(displayDate, style: .date)〜\(endDate, style: .date)")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text(displayDate, style: .date)
+                                .foregroundStyle(.secondary)
+                        }
                     } else {
                         Text("未設定")
                             .foregroundStyle(.secondary)
@@ -1111,6 +1165,8 @@ struct JourneyLogDetailView: View {
             ToolbarItem(placement: .topBarTrailing) {
                 Button("編集") {
                     editDate = group.displayDate ?? Date()
+                    editEndDate = group.displayEndDate
+                    editIsMultiDay = group.displayEndDate != nil
                     editMemo = group.memo
                     editImagesData = group.allImages
                     selectedPhotoItems = []
@@ -1127,12 +1183,23 @@ struct JourneyLogDetailView: View {
         NavigationStack {
             Form {
                 Section("訪問日") {
-                    DatePicker(
-                        "訪問日",
-                        selection: $editDate,
-                        displayedComponents: [.date]
-                    )
-                    .datePickerStyle(.compact)
+                    Toggle("複数日選択", isOn: $editIsMultiDay)
+                        .onChange(of: editIsMultiDay) { _, newValue in
+                            if !newValue {
+                                editEndDate = nil
+                            }
+                        }
+
+                    if editIsMultiDay {
+                        RangeCalendarView(startDate: $editDate, endDate: $editEndDate)
+                    } else {
+                        DatePicker(
+                            "訪問日",
+                            selection: $editDate,
+                            displayedComponents: [.date]
+                        )
+                        .datePickerStyle(.compact)
+                    }
                 }
 
                 Section("メモ") {
@@ -1254,6 +1321,7 @@ struct JourneyLogDetailView: View {
     private func saveChanges() {
         for (index, log) in group.logs.enumerated() {
             log.visitDate = editDate
+            log.visitEndDate = editIsMultiDay ? editEndDate : nil
             if index == 0 {
                 log.memo = editMemo
                 log.imagesData = editImagesData

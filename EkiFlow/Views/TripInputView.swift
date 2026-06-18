@@ -17,7 +17,9 @@ struct TripInputView: View {
     @State private var showingArrivalSearch = false
     @State private var showingViaSearch = false
     @State private var memo = ""
-    @State private var tripDate = Date()  // 訪問日
+    @State private var tripDate = Date()  // 訪問日（期間の場合は開始日）
+    @State private var tripEndDate: Date? = nil  // 訪問日の終了日（複数日選択時）
+    @State private var isMultiDay = false  // 複数日選択モード
     @State private var showingError = false
     @State private var errorMessage = ""
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
@@ -49,10 +51,12 @@ struct TripInputView: View {
                     selectedRouteSection
                     addRouteButton
                 }
-                
-                // 保存セクション（経路が1つ以上あれば表示）
+
+                // 訪問日・メモ・写真はルート選択前から入力可能
+                memoSection
+
+                // 保存ボタンは経路が1つ以上あるときだけ
                 if !savedRoutes.isEmpty || !routes.isEmpty {
-                    memoSection
                     saveSection
                 }
             }
@@ -490,12 +494,25 @@ struct TripInputView: View {
     
     private var memoSection: some View {
         Section("訪問日・メモ・写真（\(selectedImagesData.count)/\(maxPhotos)枚）") {
-            DatePicker(
-                "訪問日",
-                selection: $tripDate,
-                displayedComponents: [.date]
-            )
-            .datePickerStyle(.compact)
+            Toggle("複数日選択", isOn: $isMultiDay)
+                .onChange(of: isMultiDay) { _, newValue in
+                    // 複数日OFF: 期間を解除して開始日のみにする
+                    if !newValue {
+                        tripEndDate = nil
+                    }
+                }
+
+            if isMultiDay {
+                // カレンダーを2回タップで開始日・終了日を選ぶ
+                RangeCalendarView(startDate: $tripDate, endDate: $tripEndDate)
+            } else {
+                DatePicker(
+                    "訪問日",
+                    selection: $tripDate,
+                    displayedComponents: [.date]
+                )
+                .datePickerStyle(.compact)
+            }
 
             TextField("旅行の思い出など（任意）", text: $memo, axis: .vertical)
                 .lineLimit(3...6)
@@ -679,6 +696,7 @@ struct TripInputView: View {
                     stationName: stop.stationName,
                     status: status,
                     visitDate: tripDate,
+                    visitEndDate: isMultiDay ? tripEndDate : nil,
                     memo: isFirstLog ? memo : "",
                     imagesData: isFirstLog ? selectedImagesData : [],
                     tripId: tripId,
@@ -1147,6 +1165,173 @@ struct SearchResultRow: View {
         }
         
         return aliases.first { $0.lowercased().contains(query) }
+    }
+}
+
+// MARK: - Range Calendar（2回タップで期間を選ぶカレンダー）
+
+struct RangeCalendarView: View {
+    @Binding var startDate: Date
+    @Binding var endDate: Date?
+
+    @State private var displayMonth: Date
+    @State private var isPickingEnd = false  // true: 次のタップで終了日を確定
+
+    private let calendar = Calendar.current
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 4), count: 7)
+
+    init(startDate: Binding<Date>, endDate: Binding<Date?>) {
+        self._startDate = startDate
+        self._endDate = endDate
+        // 開始日の月を初期表示
+        self._displayMonth = State(initialValue: startDate.wrappedValue)
+    }
+
+    var body: some View {
+        VStack(spacing: 8) {
+            // 月送りヘッダー
+            HStack {
+                Button {
+                    changeMonth(by: -1)
+                } label: {
+                    Image(systemName: "chevron.left")
+                }
+                Spacer()
+                Text(monthTitle)
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                Spacer()
+                Button {
+                    changeMonth(by: 1)
+                } label: {
+                    Image(systemName: "chevron.right")
+                }
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 4)
+
+            // 選択中の期間表示
+            Text(selectionText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            // 曜日ヘッダー
+            HStack(spacing: 4) {
+                ForEach(["日", "月", "火", "水", "木", "金", "土"], id: \.self) { day in
+                    Text(day)
+                        .font(.caption2)
+                        .fontWeight(.medium)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity)
+                }
+            }
+
+            // 日付グリッド
+            LazyVGrid(columns: columns, spacing: 4) {
+                ForEach(Array(daysInMonth.enumerated()), id: \.offset) { _, date in
+                    if let date = date {
+                        dayCell(date)
+                    } else {
+                        Color.clear.aspectRatio(1, contentMode: .fit)
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func dayCell(_ date: Date) -> some View {
+        let isStart = calendar.isDate(date, inSameDayAs: startDate)
+        let isEnd = endDate.map { calendar.isDate(date, inSameDayAs: $0) } ?? false
+        let inRange = isInRange(date)
+        let isEndpoint = isStart || isEnd
+
+        let background: Color = isEndpoint ? .blue : (inRange ? Color.blue.opacity(0.15) : .clear)
+        let foreground: Color = isEndpoint ? .white : (inRange ? .blue : .primary)
+
+        return Button {
+            handleTap(date)
+        } label: {
+            Text("\(calendar.component(.day, from: date))")
+                .font(.system(size: 16, weight: isEndpoint ? .semibold : .regular))
+                .foregroundStyle(foreground)
+                .frame(maxWidth: .infinity, minHeight: 36)
+                .background(Circle().fill(background))
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Tap Logic
+
+    private func handleTap(_ date: Date) {
+        if !isPickingEnd {
+            // 1回目のタップ: 開始日を決めて終了日待ちにする
+            startDate = date
+            endDate = nil
+            isPickingEnd = true
+        } else {
+            // 2回目のタップ: 終了日を確定（開始より前なら入れ替え）
+            if date < calendar.startOfDay(for: startDate) {
+                endDate = startDate
+                startDate = date
+            } else {
+                endDate = date
+            }
+            isPickingEnd = false
+        }
+    }
+
+    private func isInRange(_ date: Date) -> Bool {
+        guard let end = endDate else { return false }
+        let d = calendar.startOfDay(for: date)
+        let s = calendar.startOfDay(for: startDate)
+        let e = calendar.startOfDay(for: end)
+        return d >= s && d <= e
+    }
+
+    // MARK: - Helpers
+
+    private func changeMonth(by value: Int) {
+        if let newMonth = calendar.date(byAdding: .month, value: value, to: displayMonth) {
+            displayMonth = newMonth
+        }
+    }
+
+    private var monthTitle: String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "ja_JP")
+        formatter.dateFormat = "yyyy年M月"
+        return formatter.string(from: displayMonth)
+    }
+
+    private var selectionText: String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "ja_JP")
+        formatter.dateFormat = "M月d日"
+        if let end = endDate {
+            return "\(formatter.string(from: startDate)) 〜 \(formatter.string(from: end))"
+        } else if isPickingEnd {
+            return "\(formatter.string(from: startDate)) 〜 （終了日をタップ）"
+        } else {
+            return formatter.string(from: startDate)
+        }
+    }
+
+    private var daysInMonth: [Date?] {
+        guard let range = calendar.range(of: .day, in: .month, for: displayMonth),
+              let firstDay = calendar.date(from: calendar.dateComponents([.year, .month], from: displayMonth)) else {
+            return []
+        }
+        let firstWeekday = calendar.component(.weekday, from: firstDay)
+        let leadingEmpty = firstWeekday - 1
+        var days: [Date?] = Array(repeating: nil, count: leadingEmpty)
+        for day in range {
+            if let date = calendar.date(byAdding: .day, value: day - 1, to: firstDay) {
+                days.append(date)
+            }
+        }
+        return days
     }
 }
 

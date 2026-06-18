@@ -9,7 +9,8 @@ class StationLog {
     var status: LogStatus = LogStatus.visited
     var timestamp: Date = Date()      // 旧フィールド（互換性のため残す）
     var createdAt: Date = Date()      // 記入日（自動記録、変更不可）
-    var visitDate: Date? = nil        // 訪問日（ユーザーが任意で入力）
+    var visitDate: Date? = nil        // 訪問日（期間の場合は開始日）
+    var visitEndDate: Date? = nil     // 訪問日の終了日（複数日選択時のみ。単日ならnil）
     var memo: String = ""
     var imageData: Data? = nil        // 写真データ（後方互換性のため残す）
     var imagesData: [Data] = []       // 複数写真データ（最大10枚）
@@ -22,6 +23,7 @@ class StationLog {
         stationName: String? = nil,
         status: LogStatus,
         visitDate: Date? = nil,
+        visitEndDate: Date? = nil,
         memo: String = "",
         imageData: Data? = nil,
         imagesData: [Data] = [],
@@ -36,6 +38,7 @@ class StationLog {
         self.timestamp = Date()
         self.createdAt = Date()
         self.visitDate = visitDate
+        self.visitEndDate = visitEndDate
         self.memo = memo
         self.imageData = imageData
         self.imagesData = imagesData
